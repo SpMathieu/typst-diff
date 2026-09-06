@@ -10,6 +10,7 @@ use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::StyleChain;
 use typst::introspection::EmptyIntrospector;
 use typst::utils::Protected;
+use typst::visualize::Color;
 use typst::World;
 use typst_layout::PagedDocument;
 
@@ -44,6 +45,56 @@ struct Args {
     /// Project root for the new file (see `--old-root`)
     #[arg(long)]
     new_root: Option<PathBuf>,
+    /// Color deleted content is struck through in. Either one of Typst's
+    /// named colors (red, orange, yellow, olive, green, lime, aqua, teal,
+    /// eastern, navy, blue, purple, fuchsia, maroon, black, gray, silver,
+    /// white) or a hex color (`#f30`, `7a03c2`, `abcdefff`)
+    #[arg(long, default_value = "red", value_parser = parse_color)]
+    deletion_color: Color,
+    /// Color added content is underlined in. Same accepted forms as
+    /// `--deletion-color`
+    #[arg(long, default_value = "blue", value_parser = parse_color)]
+    addition_color: Color,
+}
+
+/// Parses a color the way `--deletion-color`/`--addition-color` accept it:
+/// one of Typst's named colors (case-insensitive), or a hex color in any
+/// form `Color`'s own parser accepts (`#f30`, `7a03c2`, `abcdefff`...).
+///
+/// Typst resolves names like `red` as ordinary identifiers looked up in
+/// the standard library's scope, which isn't something to reach for just
+/// to parse one color, so this only mirrors the fixed list of named
+/// color *constants* the library defines (`Color::RED` etc.) -- anything
+/// fancier (`color.mix(...)`, `oklch(...)`, a named color not in this
+/// list) needs a hex code instead.
+fn parse_color(s: &str) -> Result<Color, String> {
+    let color = match s.to_ascii_lowercase().as_str() {
+        "black" => Some(Color::BLACK),
+        "gray" | "grey" => Some(Color::GRAY),
+        "white" => Some(Color::WHITE),
+        "silver" => Some(Color::SILVER),
+        "navy" => Some(Color::NAVY),
+        "blue" => Some(Color::BLUE),
+        "aqua" => Some(Color::AQUA),
+        "teal" => Some(Color::TEAL),
+        "eastern" => Some(Color::EASTERN),
+        "purple" => Some(Color::PURPLE),
+        "fuchsia" => Some(Color::FUCHSIA),
+        "maroon" => Some(Color::MAROON),
+        "red" => Some(Color::RED),
+        "orange" => Some(Color::ORANGE),
+        "yellow" => Some(Color::YELLOW),
+        "olive" => Some(Color::OLIVE),
+        "green" => Some(Color::GREEN),
+        "lime" => Some(Color::LIME),
+        _ => None,
+    };
+    if let Some(color) = color {
+        return Ok(color);
+    }
+    s.parse::<Color>().map_err(|err| {
+        format!("{s:?} is not a known color name, and not a valid hex color ({err})")
+    })
 }
 
 fn main() -> Result<()> {
@@ -70,6 +121,8 @@ fn main() -> Result<()> {
     let diff_options = DiffOptions {
         show_deletions: !args.hide_deletions,
         show_additions: !args.hide_additions,
+        deletion_color: args.deletion_color.to_vec4_u8(),
+        addition_color: args.addition_color.to_vec4_u8(),
     };
     let annotated = diff::diff_content(&content_old, &content_new, diff_options);
 

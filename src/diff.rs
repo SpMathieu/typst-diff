@@ -164,26 +164,27 @@ fn atom_to_content(atom: &Atom) -> Content {
     atom_base_content(atom).styled_with_map(atom_styles(atom).clone())
 }
 
-/// Wraps a deleted atom: struck through and red, keeping its own styles
-/// (e.g. weight, italics) for everything strikethrough/red doesn't
-/// override.
+/// Wraps a deleted atom: struck through, in `options`'s deletion color,
+/// keeping its own styles (e.g. weight, italics) for everything the
+/// strikethrough/color doesn't override.
 ///
-/// The red fill is applied to the *base* content before the atom's own
+/// The color is applied to the *base* content before the atom's own
 /// styles are layered on top, so it ends up as the most specific (highest
 /// priority) style — it's the whole point of the highlighting that it
 /// stays visible no matter what color the surrounding document set.
-fn wrap_deleted(atom: &Atom) -> Content {
+fn wrap_deleted(atom: &Atom, options: DiffOptions) -> Content {
     let content = atom_base_content(atom)
-        .styled(TextElem::fill.set(Color::RED.into()))
+        .styled(TextElem::fill.set(options.deletion_color().into()))
         .styled_with_map(atom_styles(atom).clone());
     StrikeElem::new(content).pack()
 }
 
-/// Wraps an added atom: underlined and blue. See `wrap_deleted` for why
-/// the color is applied before the atom's own styles.
-fn wrap_added(atom: &Atom) -> Content {
+/// Wraps an added atom: underlined, in `options`'s addition color. See
+/// `wrap_deleted` for why the color is applied before the atom's own
+/// styles.
+fn wrap_added(atom: &Atom, options: DiffOptions) -> Content {
     let content = atom_base_content(atom)
-        .styled(TextElem::fill.set(Color::BLUE.into()))
+        .styled(TextElem::fill.set(options.addition_color().into()))
         .styled_with_map(atom_styles(atom).clone());
     UnderlineElem::new(content).pack()
 }
@@ -302,25 +303,25 @@ fn recurse_into_replaced(old: &Atom, new: &Atom, options: DiffOptions) -> Option
 /// result is still a valid table cell — see `recurse_into_table`. Mirrors
 /// `wrap_deleted`/`wrap_added`, just applied to `cell.body` in place of a
 /// bare atom.
-fn wrap_cell_deleted(cell: &Packed<TableCell>) -> Packed<TableCell> {
+fn wrap_cell_deleted(cell: &Packed<TableCell>, options: DiffOptions) -> Packed<TableCell> {
     let mut rebuilt = cell.clone();
     rebuilt.body = StrikeElem::new(
         rebuilt
             .body
             .clone()
-            .styled(TextElem::fill.set(Color::RED.into())),
+            .styled(TextElem::fill.set(options.deletion_color().into())),
     )
     .pack();
     rebuilt
 }
 
-fn wrap_cell_added(cell: &Packed<TableCell>) -> Packed<TableCell> {
+fn wrap_cell_added(cell: &Packed<TableCell>, options: DiffOptions) -> Packed<TableCell> {
     let mut rebuilt = cell.clone();
     rebuilt.body = UnderlineElem::new(
         rebuilt
             .body
             .clone()
-            .styled(TextElem::fill.set(Color::BLUE.into())),
+            .styled(TextElem::fill.set(options.addition_color().into())),
     )
     .pack();
     rebuilt
@@ -449,7 +450,7 @@ fn recurse_into_table(old: &Atom, new: &Atom, options: DiffOptions) -> Option<Co
         if options.show_deletions {
             children.extend(
                 row.iter()
-                    .map(wrap_cell_deleted)
+                    .map(|cell| wrap_cell_deleted(cell, options))
                     .map(|cell| TableChild::Item(TableItem::Cell(cell))),
             );
         }
@@ -457,7 +458,7 @@ fn recurse_into_table(old: &Atom, new: &Atom, options: DiffOptions) -> Option<Co
     let push_added_row = |children: &mut Vec<TableChild>, row: &[Packed<TableCell>]| {
         let cells = row.iter().map(|cell| {
             if options.show_additions {
-                wrap_cell_added(cell)
+                wrap_cell_added(cell, options)
             } else {
                 cell.clone()
             }
@@ -509,14 +510,37 @@ fn recurse_into_table(old: &Atom, new: &Atom, options: DiffOptions) -> Option<Co
 
 /// Controls how deletions and additions are rendered in the annotated
 /// output.
+///
+/// Colors are stored as RGBA bytes rather than `Color` directly so this
+/// stays `Copy` (`Color` isn't) — `deletion_color()`/`addition_color()`
+/// convert back to a real `Color` on demand.
 #[derive(Clone, Copy)]
 pub struct DiffOptions {
     /// If `false`, deleted content is dropped entirely instead of being
-    /// shown struck through in red.
+    /// shown struck through.
     pub show_deletions: bool,
     /// If `false`, added content is rendered in standard style (no
-    /// underline, no color change) instead of underlined in blue.
+    /// underline, no color change) instead of underlined.
     pub show_additions: bool,
+    /// Color deleted content is struck through in. Defaults to Typst's
+    /// `red`.
+    pub deletion_color: [u8; 4],
+    /// Color added content is underlined in. Defaults to Typst's `blue`.
+    pub addition_color: [u8; 4],
+}
+
+impl DiffOptions {
+    fn deletion_color(&self) -> Color {
+        rgba(self.deletion_color)
+    }
+
+    fn addition_color(&self) -> Color {
+        rgba(self.addition_color)
+    }
+}
+
+fn rgba(c: [u8; 4]) -> Color {
+    Color::from_u8(c[0], c[1], c[2], c[3])
 }
 
 impl Default for DiffOptions {
@@ -524,6 +548,8 @@ impl Default for DiffOptions {
         Self {
             show_deletions: true,
             show_additions: true,
+            deletion_color: Color::RED.to_vec4_u8(),
+            addition_color: Color::BLUE.to_vec4_u8(),
         }
     }
 }
@@ -554,12 +580,12 @@ pub fn diff_content(old: &Content, new: &Content, options: DiffOptions) -> Conte
     let mut result = Vec::new();
     let push_deleted = |result: &mut Vec<Content>, atom: &Atom| {
         if options.show_deletions {
-            result.push(wrap_deleted(atom));
+            result.push(wrap_deleted(atom, options));
         }
     };
     let push_added = |result: &mut Vec<Content>, atom: &Atom| {
         result.push(if options.show_additions {
-            wrap_added(atom)
+            wrap_added(atom, options)
         } else {
             atom_to_content(atom)
         });

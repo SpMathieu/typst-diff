@@ -105,6 +105,36 @@ cargo run --release -- examples/old/src/main.typ examples/new/src/main.typ \
   --hide-deletions --hide-additions
 ```
 
+### Changing the deletion/addition colors
+
+By default, deletions are red and additions are blue. `--deletion-color`
+and `--addition-color` override either one — with one of Typst's 18 named
+colors (`red`, `orange`, `yellow`, `olive`, `green`, `lime`, `aqua`,
+`teal`, `eastern`, `navy`, `blue`, `purple`, `fuchsia`, `maroon`, `black`,
+`gray`, `silver`, `white`) or a hex color (`#f30`, `7a03c2`, `abcdefff`):
+
+```bash
+cargo run --release -- examples/old/src/main.typ examples/new/src/main.typ \
+  diff.pdf --old-root examples/old --new-root examples/new \
+  --deletion-color orange --addition-color "#00b894"
+```
+
+Anything fancier than that (`color.mix(...)`, `oklch(...)`, a named color
+outside that list) isn't supported — `parse_color()` in `src/main.rs`
+only mirrors Typst's fixed list of named color *constants*
+(`Color::RED`, etc.), it doesn't evaluate a real Typst color expression.
+Use a hex code for anything not in the list above.
+
+**Quote a hex color that starts with `#`** (`"#f30"`, not `#f30`) — this
+isn't specific to `typst-diff`, it's how every shell works: an unquoted
+`#` starts a comment, so the shell silently drops it and everything
+after it on the line before your command even runs. Without quotes,
+`--addition-color #f30` reaches `typst-diff` as `--addition-color` with
+no value at all, which is why it fails with "a value is required for
+'--addition-color'" rather than a color-parsing error. A hex color
+*without* the leading `#` (`f30`, `7a03c2`) doesn't have this problem
+and needs no quoting, since it isn't special to the shell.
+
 ### Multi-file projects
 
 A real Typst document is rarely a single file: it typically `#include`s or
