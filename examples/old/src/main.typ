@@ -27,6 +27,14 @@
 
 Revenue: #data.revenue
 
+// Proof that editing *inside* strong()/emph()/a link only marks the
+// changed word(s), not the whole span -- see `recurse_into_replaced` in
+// src/diff.rs. Compare this paragraph's diff to the heading above: same
+// idea, extended from headings to these three element kinds.
+Our *headline numbers* remain accurate, and our methodology stays
+_fully transparent_. Full details are available on
+#link("https://example.com/reports/q1-2026")[last quarter's portal].
+
 // Relative include: "./confidential.typ" is resolved against this file's
 // own directory (src/), wherever the project root is.
 #include "./confidential.typ"

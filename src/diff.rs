@@ -7,6 +7,7 @@ use std::hash::{Hash, Hasher};
 
 use similar::{capture_diff_slices, Algorithm, DiffOp};
 use typst::foundations::{Content, NativeElement, SequenceElem, StyledElem, Styles};
+use typst::model::{EmphElem, HeadingElem, LinkElem, StrongElem};
 use typst::text::{StrikeElem, TextElem, UnderlineElem};
 use typst::visualize::Color;
 
@@ -185,6 +186,101 @@ fn wrap_added(atom: &Atom) -> Content {
     UnderlineElem::new(content).pack()
 }
 
+/// A "wrapper" element that holds one piece of inner content in a `body`
+/// field: headings (`= Title`), `strong()`, `emph()`, and links all have
+/// this shape. See `recurse_into_replaced` for why this matters.
+trait BodyElement: NativeElement {
+    fn body(&self) -> &Content;
+    fn set_body(&mut self, body: Content);
+}
+
+/// Implements `BodyElement` for a list of types that all happen to have a
+/// public `body: Content` field — true of every element listed below.
+macro_rules! impl_body_element {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl BodyElement for $ty {
+                fn body(&self) -> &Content { &self.body }
+                fn set_body(&mut self, body: Content) { self.body = body; }
+            }
+        )+
+    };
+}
+
+impl_body_element!(HeadingElem, StrongElem, EmphElem, LinkElem);
+
+/// If `old_content` and `new_content` are both a `BodyElement` of the same
+/// kind `E`, diffs their bodies word-by-word and rewraps the result in a
+/// fresh `E` built from `new_content`'s own other attributes (heading
+/// level/numbering, link destination...) — consistent with the "new
+/// document wins" rule `diff_content` documents. Returns `None` if either
+/// side isn't (or isn't the same kind of) `E`.
+fn try_recurse<E: BodyElement>(
+    old_content: &Content,
+    new_content: &Content,
+    options: DiffOptions,
+) -> Option<Content> {
+    let old_body = old_content.to_packed::<E>()?.body();
+    let new_body = new_content.to_packed::<E>()?.body();
+
+    // Only worth recursing if the two bodies actually share some word
+    // (spaces always "match" regardless of the words around them, so they
+    // don't count) -- otherwise word-level diffing can scramble two
+    // completely unrelated spans across each other (e.g. one name
+    // replaced by an unrelated one splits into per-word deletes/inserts
+    // that interleave in a confusing order), which reads far worse than a
+    // clean whole-span delete-then-insert. Bailing out here to fall back
+    // to that is a deliberate trade-off, not just an optimization.
+    let atoms_old = flatten(old_body);
+    let atoms_new = flatten(new_body);
+    let shares_a_word =
+        atoms_old.iter().any(|atom| !matches!(atom, Atom::Space(_)) && atoms_new.contains(atom));
+    if !shares_a_word {
+        return None;
+    }
+
+    let diffed = diff_content(old_body, new_body, options);
+
+    let mut rebuilt = new_content.clone().into_packed::<E>().ok()?;
+    rebuilt.set_body(diffed);
+    Some(rebuilt.pack())
+}
+
+/// When the top-level diff decided that one whole `Leaf` atom was replaced
+/// by another (a straight 1-for-1 `Replace`), this recognizes cases where
+/// both sides are actually the *same kind* of `BodyElement` — a heading,
+/// `strong()`, `emph()`, or a link — and, rather than blindly swapping the
+/// whole element, recurses the diff into their bodies word-by-word (see
+/// `try_recurse`).
+///
+/// Without this, editing one word inside a heading's title, or inside
+/// bold/italic/linked text, would strike through and re-underline the
+/// *entire* span instead of just that word — the "treated as one atomic
+/// block" limitation the README describes for `strong()`/`emph()`/links.
+/// It can't just be fixed by traversing into these elements in `collect()`
+/// the way `SequenceElem`/`StyledElem` are traversed, though: their
+/// wrapper is what makes them render as bold/italic/a link/a heading at
+/// all, so — unlike a `StyledElem`, which carries no rendering behavior of
+/// its own beyond the styles `collect()` already carries along on each
+/// atom — the wrapper has to be rebuilt around the diffed body, not
+/// discarded while flattening.
+///
+/// Returns `None` when the pair isn't a kind of wrapper this recognizes,
+/// so the caller falls back to the usual delete-then-insert. Add a case to
+/// `impl_body_element!`'s list (and try it below) for other single-body
+/// wrapper elements you want the same treatment for.
+fn recurse_into_replaced(old: &Atom, new: &Atom, options: DiffOptions) -> Option<Content> {
+    let Atom::Leaf(old_content, _) = old else { return None };
+    let Atom::Leaf(new_content, new_styles) = new else { return None };
+
+    let rebuilt = try_recurse::<HeadingElem>(old_content, new_content, options)
+        .or_else(|| try_recurse::<StrongElem>(old_content, new_content, options))
+        .or_else(|| try_recurse::<EmphElem>(old_content, new_content, options))
+        .or_else(|| try_recurse::<LinkElem>(old_content, new_content, options))?;
+
+    Some(rebuilt.styled_with_map(new_styles.clone()))
+}
+
 /// Controls how deletions and additions are rendered in the annotated
 /// output.
 #[derive(Clone, Copy)]
@@ -257,7 +353,22 @@ pub fn diff_content(old: &Content, new: &Content, options: DiffOptions) -> Conte
                 }
             }
             DiffOp::Replace { old_index, old_len, new_index, new_len } => {
-                // A modification = deletion of the old + addition of the new.
+                // A straight 1-for-1 swap of two headings is diffed word
+                // by word instead of struck-through/re-underlined whole
+                // (see `recurse_into_replaced`).
+                if old_len == 1 && new_len == 1 {
+                    if let Some(content) = recurse_into_replaced(
+                        &atoms_old[old_index],
+                        &atoms_new[new_index],
+                        options,
+                    ) {
+                        result.push(content);
+                        continue;
+                    }
+                }
+
+                // Otherwise, a modification = deletion of the old +
+                // addition of the new.
                 for i in 0..old_len {
                     push_deleted(&mut result, &atoms_old[old_index + i]);
                 }

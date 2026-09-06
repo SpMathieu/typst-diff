@@ -198,11 +198,36 @@ typst-diff/
   text become different *kinds* of atoms (a `Leaf` vs `Word`s), so they
   never match, and the diff shows a full delete of the old, plain version
   followed by a full insert of the new, bold one.
-- **Word-by-word diff only within raw text**: content inside elements like
-  `strong()`/`emph()`/links is treated as a
-  single block rather than being diffed word by word internally. See the
-  comments in `src/diff.rs`, function `collect()`, for where to extend this
-  behavior.
+- **Word-by-word diff inside headings, `strong()`, `emph()`, and links,
+  but not arbitrary elements**: by default, `collect()` treats an element
+  it doesn't specifically know how to traverse (an image, a table, a
+  citation...) as one opaque block — editing anything inside it strikes
+  through/re-underlines the *whole* thing. Headings (`= Title`),
+  `strong()`, `emph()`, and links are the exceptions: `diff_content()`'s
+  `recurse_into_replaced()` specifically recognizes when the top-level
+  diff wholesale-replaced one of these with another of the *same* kind,
+  and in that case diffs their bodies word by word instead, rewrapping the
+  result in a fresh element that keeps the new document's own other
+  attributes (heading level/numbering, link destination...). See
+  `examples/*/src/main.typ` for a live demonstration of all four (the
+  heading title, plus a paragraph with a partly-edited bold phrase,
+  italic phrase, and link). These can't just be traversed and flattened
+  away during `collect()` the way `SequenceElem`/`StyledElem` are, since
+  unlike those, their wrapper is what makes them render as a
+  heading/bold/italic/a link at all — it has to be rebuilt around the
+  diffed body, not discarded. Add a case to `impl_body_element!`'s list in
+  `src/diff.rs` for other single-body wrapper elements you want the same
+  treatment for.
+
+  This recursion only kicks in when the two bodies share at least one
+  word — otherwise (e.g. one client's name entirely replaced by an
+  unrelated one, both set in `strong()`) it's skipped in favor of the
+  plain whole-span delete-then-insert, since word-level diffing of two
+  completely unrelated phrases can scramble them across each other in a
+  confusing order (spaces "match" regardless of the words around them, so
+  even totally different text can appear to partially align). The
+  "Dupont Inc." → "Martin & Co." client name in the examples exercises
+  this fallback deliberately, right next to the cases that do recurse.
 - **Single layout pass**: Typst normally re-runs layout several times to
   stabilize cross-references (table of contents, counters...). This
   project only does a single pass — plenty to try out the idea, but worth
