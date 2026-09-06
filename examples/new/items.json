@@ -1,0 +1,7 @@
+[
+  {"name": "Marketing", "growth": 6},
+  {"name": "Sales", "growth": 18},
+  {"name": "Engineering", "growth": 20},
+  {"name": "Legal", "growth": 5},
+  {"name": "HR", "growth": 6}
+]

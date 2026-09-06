@@ -56,8 +56,8 @@ impl SimpleWorld {
     /// file lives in a subdirectory of the actual project root (e.g.
     /// `<root>/src/main.typ`).
     pub fn new(main_path: &Path, root: &Path) -> Result<Self> {
-        let source_text = std::fs::read_to_string(main_path)
-            .with_context(|| format!("reading {main_path:?}"))?;
+        let source_text =
+            std::fs::read_to_string(main_path).with_context(|| format!("reading {main_path:?}"))?;
 
         // Fonts embedded with the compiler (Linux Libertine, etc.).
         // Requires the `fonts` feature on the `typst-assets` crate.
@@ -76,9 +76,8 @@ impl SimpleWorld {
         // position relative to `root` — this is what makes absolute
         // (`/...`) and relative (`./...`) imports resolve correctly from
         // within it, exactly as they would for any other file.
-        let vpath = VirtualPath::virtualize(root, main_path).with_context(|| {
-            format!("{main_path:?} is not inside the project root {root:?}")
-        })?;
+        let vpath = VirtualPath::virtualize(root, main_path)
+            .with_context(|| format!("{main_path:?} is not inside the project root {root:?}"))?;
         let file_id = RootedPath::new(VirtualRoot::Project, vpath).intern();
 
         Ok(Self {
@@ -123,7 +122,9 @@ impl World for SimpleWorld {
         // Only plain project files are supported (no packages, since
         // there's no package downloader here).
         if !matches!(id.root(), VirtualRoot::Project) {
-            return Err(FileError::NotFound(PathBuf::from(id.vpath().get_without_slash())));
+            return Err(FileError::NotFound(PathBuf::from(
+                id.vpath().get_without_slash(),
+            )));
         }
 
         let path = id.vpath().realize(&self.root).map_err(FileError::Realize)?;
@@ -138,7 +139,9 @@ impl World for SimpleWorld {
         // Only plain project files are supported (no packages, since
         // there's no package downloader here).
         if !matches!(id.root(), VirtualRoot::Project) {
-            return Err(FileError::NotFound(PathBuf::from(id.vpath().get_without_slash())));
+            return Err(FileError::NotFound(PathBuf::from(
+                id.vpath().get_without_slash(),
+            )));
         }
 
         let path = id.vpath().realize(&self.root).map_err(FileError::Realize)?;

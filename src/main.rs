@@ -91,16 +91,25 @@ fn main() -> Result<()> {
 /// Canonicalizes a path (resolves it to an absolute path with symlinks and
 /// `.`/`..` components resolved away), with a friendly error on failure.
 fn canonicalize(path: &std::path::Path) -> Result<PathBuf> {
-    path.canonicalize().with_context(|| format!("reading {path:?}"))
+    path.canonicalize()
+        .with_context(|| format!("reading {path:?}"))
 }
 
 /// Resolves the real project root for an already-canonicalized `.typ` file
 /// path: either the explicit `--old-root`/`--new-root` the user passed
 /// (canonicalized too), or, by default, the file's own parent directory.
-fn resolve_root(main_path: &std::path::Path, explicit_root: Option<&std::path::Path>) -> Result<PathBuf> {
+fn resolve_root(
+    main_path: &std::path::Path,
+    explicit_root: Option<&std::path::Path>,
+) -> Result<PathBuf> {
     match explicit_root {
-        Some(root) => root.canonicalize().with_context(|| format!("resolving project root {root:?}")),
-        None => Ok(main_path.parent().expect("a canonical file path has a parent").to_path_buf()),
+        Some(root) => root
+            .canonicalize()
+            .with_context(|| format!("resolving project root {root:?}")),
+        None => Ok(main_path
+            .parent()
+            .expect("a canonical file path has a parent")
+            .to_path_buf()),
     }
 }
 

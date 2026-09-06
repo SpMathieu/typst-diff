@@ -6,8 +6,10 @@ use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
 use similar::{capture_diff_slices, Algorithm, DiffOp};
-use typst::foundations::{Content, NativeElement, SequenceElem, StyledElem, Styles};
-use typst::model::{EmphElem, HeadingElem, LinkElem, StrongElem};
+use typst::foundations::{Content, NativeElement, Packed, SequenceElem, StyledElem, Styles};
+use typst::model::{
+    EmphElem, HeadingElem, LinkElem, StrongElem, TableCell, TableChild, TableElem, TableItem,
+};
 use typst::text::{StrikeElem, TextElem, UnderlineElem};
 use typst::visualize::Color;
 
@@ -186,6 +188,21 @@ fn wrap_added(atom: &Atom) -> Content {
     UnderlineElem::new(content).pack()
 }
 
+/// Whether two pieces of content have at least one word (or other atom) in
+/// common — spaces don't count, since they'd "match" regardless of the
+/// words around them. Used by `try_recurse` to decide whether word-level
+/// diffing is worth it at all for a given pair, versus falling back to a
+/// clean whole-thing delete-then-insert (see its doc comment for why that
+/// fallback matters). `recurse_into_table` needs a coarser, whole-cell
+/// version of the same idea instead — see `row_shares_content`.
+fn content_shares_a_word(old: &Content, new: &Content) -> bool {
+    let atoms_old = flatten(old);
+    let atoms_new = flatten(new);
+    atoms_old
+        .iter()
+        .any(|atom| !matches!(atom, Atom::Space(_)) && atoms_new.contains(atom))
+}
+
 /// A "wrapper" element that holds one piece of inner content in a `body`
 /// field: headings (`= Title`), `strong()`, `emph()`, and links all have
 /// this shape. See `recurse_into_replaced` for why this matters.
@@ -223,19 +240,14 @@ fn try_recurse<E: BodyElement>(
     let old_body = old_content.to_packed::<E>()?.body();
     let new_body = new_content.to_packed::<E>()?.body();
 
-    // Only worth recursing if the two bodies actually share some word
-    // (spaces always "match" regardless of the words around them, so they
-    // don't count) -- otherwise word-level diffing can scramble two
-    // completely unrelated spans across each other (e.g. one name
-    // replaced by an unrelated one splits into per-word deletes/inserts
-    // that interleave in a confusing order), which reads far worse than a
-    // clean whole-span delete-then-insert. Bailing out here to fall back
-    // to that is a deliberate trade-off, not just an optimization.
-    let atoms_old = flatten(old_body);
-    let atoms_new = flatten(new_body);
-    let shares_a_word =
-        atoms_old.iter().any(|atom| !matches!(atom, Atom::Space(_)) && atoms_new.contains(atom));
-    if !shares_a_word {
+    // Only worth recursing if the two bodies actually share some word --
+    // otherwise word-level diffing can scramble two completely unrelated
+    // spans across each other (e.g. one name replaced by an unrelated one
+    // splits into per-word deletes/inserts that interleave in a confusing
+    // order), which reads far worse than a clean whole-span
+    // delete-then-insert. Bailing out here to fall back to that is a
+    // deliberate trade-off, not just an optimization.
+    if !content_shares_a_word(old_body, new_body) {
         return None;
     }
 
@@ -270,8 +282,12 @@ fn try_recurse<E: BodyElement>(
 /// `impl_body_element!`'s list (and try it below) for other single-body
 /// wrapper elements you want the same treatment for.
 fn recurse_into_replaced(old: &Atom, new: &Atom, options: DiffOptions) -> Option<Content> {
-    let Atom::Leaf(old_content, _) = old else { return None };
-    let Atom::Leaf(new_content, new_styles) = new else { return None };
+    let Atom::Leaf(old_content, _) = old else {
+        return None;
+    };
+    let Atom::Leaf(new_content, new_styles) = new else {
+        return None;
+    };
 
     let rebuilt = try_recurse::<HeadingElem>(old_content, new_content, options)
         .or_else(|| try_recurse::<StrongElem>(old_content, new_content, options))
@@ -279,6 +295,216 @@ fn recurse_into_replaced(old: &Atom, new: &Atom, options: DiffOptions) -> Option
         .or_else(|| try_recurse::<LinkElem>(old_content, new_content, options))?;
 
     Some(rebuilt.styled_with_map(new_styles.clone()))
+}
+
+/// Wraps a table cell's body for deletion/addition, keeping the cell
+/// itself (position, colspan/rowspan, alignment, fill...) intact so the
+/// result is still a valid table cell — see `recurse_into_table`. Mirrors
+/// `wrap_deleted`/`wrap_added`, just applied to `cell.body` in place of a
+/// bare atom.
+fn wrap_cell_deleted(cell: &Packed<TableCell>) -> Packed<TableCell> {
+    let mut rebuilt = cell.clone();
+    rebuilt.body = StrikeElem::new(
+        rebuilt
+            .body
+            .clone()
+            .styled(TextElem::fill.set(Color::RED.into())),
+    )
+    .pack();
+    rebuilt
+}
+
+fn wrap_cell_added(cell: &Packed<TableCell>) -> Packed<TableCell> {
+    let mut rebuilt = cell.clone();
+    rebuilt.body = UnderlineElem::new(
+        rebuilt
+            .body
+            .clone()
+            .styled(TextElem::fill.set(Color::BLUE.into())),
+    )
+    .pack();
+    rebuilt
+}
+
+/// Splits a table's children into its plain data cells, in order —
+/// `table.header`/`table.footer` children are left out (`recurse_into_table`
+/// keeps those from the *new* table as-is, unchanged).
+///
+/// Returns `None` if the table also uses `table.hline`/`table.vline`:
+/// diffing cell-by-cell doesn't know where a manually placed line should
+/// end up once rows are added or removed around it, so tables using those
+/// are intentionally left to the plain whole-table fallback instead.
+fn table_cells(children: &[TableChild]) -> Option<Vec<Packed<TableCell>>> {
+    let mut cells = Vec::new();
+    for child in children {
+        match child {
+            TableChild::Header(_) | TableChild::Footer(_) => {}
+            TableChild::Item(TableItem::Cell(cell)) => cells.push(cell.clone()),
+            TableChild::Item(TableItem::HLine(_) | TableItem::VLine(_)) => return None,
+        }
+    }
+    Some(cells)
+}
+
+/// The number of columns a table was explicitly given, if any.
+///
+/// `columns` is a settable (`#set table(columns: ...)`) property, not a
+/// plain field, hence `.as_option()`. Returns `None` if it wasn't set
+/// locally on this table (relying on an ambient `#set` from outside,
+/// which isn't visible here — there's no style chain at this point in the
+/// pipeline, only the bare `Content`) or is explicitly empty.
+fn column_count(table: &Packed<TableElem>) -> Option<usize> {
+    let n = table.columns.as_option().as_ref()?.0.len();
+    (n > 0).then_some(n)
+}
+
+/// Whether two same-position rows share any *whole cell* — i.e. some cell
+/// at the same column position is exactly identical on both sides.
+///
+/// This deliberately checks whole cells, not individual words within
+/// them (unlike `content_shares_a_word`, which is the right granularity
+/// for a run of prose): a table's cells are often short, formulaic values
+/// that can share a trivial fragment — e.g. two unrelated percentages
+/// like "3%" and "20%" both contain the literal "%" — without the row
+/// actually having anything meaningful in common. Requiring a *whole*
+/// matching cell avoids treating that kind of coincidence as a reason to
+/// diff the row cell by cell instead of replacing it outright.
+fn row_shares_content(old_row: &[Packed<TableCell>], new_row: &[Packed<TableCell>]) -> bool {
+    old_row.iter().zip(new_row).any(|(old_cell, new_cell)| {
+        format!("{:?}", old_cell.body) == format!("{:?}", new_cell.body)
+    })
+}
+
+/// When the top-level diff decided that one whole table was replaced by
+/// another (a straight 1-for-1 `Replace`), this compares their *rows*
+/// (groups of `columns` consecutive cells) **position by position** — row
+/// 1 of the old table against row 1 of the new one, row 2 against row 2,
+/// and so on — instead of stacking the entire old table on top of the
+/// entire new one.
+///
+/// Rows have to be the unit compared here, not individual cells: a table
+/// has no explicit "row" grouping in its `Content` tree (cells are just a
+/// flat list, wrapped into a grid `columns` cells at a time), so treating
+/// individual cells as the unit being aligned, rather than whole rows,
+/// can shift every cell after a change out of its column as soon as an
+/// unequal number of cells needs replacing around one point.
+///
+/// Each pair of rows at the same position has its cells diffed one by one
+/// (each cell recursed into via `diff_content`, so a single edited word is
+/// still diffed word by word rather than swapping the whole cell) — *if*
+/// the two rows share some content (like `try_recurse`'s guard on
+/// `strong()`/`emph()`/links, applied here to a whole row instead of one
+/// span of text). A row whose content is entirely unrelated to the row at
+/// the same position on the other side (e.g. one whole record replaced by
+/// an unrelated one) is instead shown as a clean whole-row deletion
+/// immediately followed by a whole-row insertion, same as if it had no
+/// counterpart at all — cell-by-cell diffing two unrelated rows would just
+/// pair up coincidentally-placed cells with nothing to do with each other.
+/// If the two tables have a different number of rows, the extra rows on
+/// the longer side (always at the end, since rows before that are already
+/// paired by position) are likewise shown as plain whole-row
+/// deletions/insertions.
+///
+/// Returns `None` — falling back to the plain whole-table swap — when
+/// either table doesn't have an explicit, equal `columns` count (see
+/// `column_count`), or either uses `table.hline`/`table.vline`, or their
+/// cells don't divide evenly into that many columns (see `table_cells`):
+/// this covers the common case of a JSON-array-backed table gaining/losing
+/// rows, not a full reimplementation of Typst's grid layout algorithm.
+fn recurse_into_table(old: &Atom, new: &Atom, options: DiffOptions) -> Option<Content> {
+    let Atom::Leaf(old_content, _) = old else {
+        return None;
+    };
+    let Atom::Leaf(new_content, new_styles) = new else {
+        return None;
+    };
+
+    let old_table = old_content.to_packed::<TableElem>()?;
+    let new_table = new_content.to_packed::<TableElem>()?;
+    let columns = column_count(old_table)?;
+    if Some(columns) != column_count(new_table) {
+        return None;
+    }
+
+    let old_cells = table_cells(&old_table.children)?;
+    let new_cells = table_cells(&new_table.children)?;
+    if old_cells.len() % columns != 0 || new_cells.len() % columns != 0 {
+        return None;
+    }
+    let old_rows: Vec<&[Packed<TableCell>]> = old_cells.chunks(columns).collect();
+    let new_rows: Vec<&[Packed<TableCell>]> = new_cells.chunks(columns).collect();
+
+    // Headers/footers are kept from the new table, as-is (consistent with
+    // "new document wins"), regardless of where they sat among the plain
+    // cells originally — `table.header`/`table.footer` always repeat at
+    // the top/bottom no matter their position among a table's children.
+    let mut children: Vec<TableChild> = new_table
+        .children
+        .iter()
+        .filter(|c| matches!(c, TableChild::Header(_)))
+        .cloned()
+        .collect();
+
+    let push_deleted_row = |children: &mut Vec<TableChild>, row: &[Packed<TableCell>]| {
+        if options.show_deletions {
+            children.extend(
+                row.iter()
+                    .map(wrap_cell_deleted)
+                    .map(|cell| TableChild::Item(TableItem::Cell(cell))),
+            );
+        }
+    };
+    let push_added_row = |children: &mut Vec<TableChild>, row: &[Packed<TableCell>]| {
+        let cells = row.iter().map(|cell| {
+            if options.show_additions {
+                wrap_cell_added(cell)
+            } else {
+                cell.clone()
+            }
+        });
+        children.extend(cells.map(|cell| TableChild::Item(TableItem::Cell(cell))));
+    };
+
+    // Rows present on both sides, paired by position: diff each cell in
+    // place rather than swapping the whole row -- unless the two rows
+    // share nothing at all, in which case the old row is deleted and the
+    // new one inserted right after it (see the doc comment above).
+    let paired = old_rows.len().min(new_rows.len());
+    for (old_row, new_row) in old_rows[..paired].iter().zip(&new_rows[..paired]) {
+        if !row_shares_content(old_row, new_row) {
+            push_deleted_row(&mut children, old_row);
+            push_added_row(&mut children, new_row);
+            continue;
+        }
+
+        let cells = old_row.iter().zip(*new_row).map(|(old_cell, new_cell)| {
+            let mut cell = new_cell.clone();
+            cell.body = diff_content(&old_cell.body, &new_cell.body, options);
+            TableChild::Item(TableItem::Cell(cell))
+        });
+        children.extend(cells);
+    }
+
+    // Extra rows past the shorter table's length: whole-row
+    // deletions/insertions (at most one of these loops actually runs).
+    for row in &old_rows[paired..] {
+        push_deleted_row(&mut children, row);
+    }
+    for row in &new_rows[paired..] {
+        push_added_row(&mut children, row);
+    }
+
+    children.extend(
+        new_table
+            .children
+            .iter()
+            .filter(|c| matches!(c, TableChild::Footer(_)))
+            .cloned(),
+    );
+
+    let mut rebuilt = new_content.clone().into_packed::<TableElem>().ok()?;
+    rebuilt.children = children;
+    Some(rebuilt.pack().styled_with_map(new_styles.clone()))
 }
 
 /// Controls how deletions and additions are rendered in the annotated
@@ -295,7 +521,10 @@ pub struct DiffOptions {
 
 impl Default for DiffOptions {
     fn default() -> Self {
-        Self { show_deletions: true, show_additions: true }
+        Self {
+            show_deletions: true,
+            show_additions: true,
+        }
     }
 }
 
@@ -329,7 +558,11 @@ pub fn diff_content(old: &Content, new: &Content, options: DiffOptions) -> Conte
         }
     };
     let push_added = |result: &mut Vec<Content>, atom: &Atom| {
-        result.push(if options.show_additions { wrap_added(atom) } else { atom_to_content(atom) });
+        result.push(if options.show_additions {
+            wrap_added(atom)
+        } else {
+            atom_to_content(atom)
+        });
     };
 
     for op in ops {
@@ -342,26 +575,40 @@ pub fn diff_content(old: &Content, new: &Content, options: DiffOptions) -> Conte
                     result.push(atom_to_content(&atoms_new[new_index + i]));
                 }
             }
-            DiffOp::Delete { old_index, old_len, .. } => {
+            DiffOp::Delete {
+                old_index, old_len, ..
+            } => {
                 for i in 0..old_len {
                     push_deleted(&mut result, &atoms_old[old_index + i]);
                 }
             }
-            DiffOp::Insert { new_index, new_len, .. } => {
+            DiffOp::Insert {
+                new_index, new_len, ..
+            } => {
                 for i in 0..new_len {
                     push_added(&mut result, &atoms_new[new_index + i]);
                 }
             }
-            DiffOp::Replace { old_index, old_len, new_index, new_len } => {
-                // A straight 1-for-1 swap of two headings is diffed word
-                // by word instead of struck-through/re-underlined whole
-                // (see `recurse_into_replaced`).
+            DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => {
+                // A straight 1-for-1 swap of two headings/strong()/emph()/
+                // links/tables is diffed into its parts instead of struck
+                // through/re-underlined whole (see `recurse_into_replaced`
+                // and `recurse_into_table`).
                 if old_len == 1 && new_len == 1 {
-                    if let Some(content) = recurse_into_replaced(
+                    let recursed = recurse_into_replaced(
                         &atoms_old[old_index],
                         &atoms_new[new_index],
                         options,
-                    ) {
+                    )
+                    .or_else(|| {
+                        recurse_into_table(&atoms_old[old_index], &atoms_new[new_index], options)
+                    });
+                    if let Some(content) = recursed {
                         result.push(content);
                         continue;
                     }

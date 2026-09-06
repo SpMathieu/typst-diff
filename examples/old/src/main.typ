@@ -3,10 +3,12 @@
 //
 //   old/
 //   ├── data.json           <- the JSON export this report reads
+//   ├── items.json          <- a JSON *array*, read by items.typ below
 //   ├── lib/report.typ      <- imported below by an *absolute* path
 //   └── src/
 //       ├── main.typ         <- this file
-//       └── confidential.typ <- pulled in below by a *relative* path
+//       ├── confidential.typ <- pulled in below by a *relative* path
+//       └── items.typ        <- pulled in below by a *relative* path
 //
 // Since this file lives one level down from the project root (in src/),
 // run typst-diff with `--old-root`/`--new-root` pointing at "examples/old"
@@ -38,3 +40,17 @@ _fully transparent_. Full details are available on
 // Relative include: "./confidential.typ" is resolved against this file's
 // own directory (src/), wherever the project root is.
 #include "./confidential.typ"
+
+// A department-by-department breakdown, loaded and rendered by
+// items.typ (its own include, its own JSON file).
+#include "./items.typ"
+
+// Proof of a *structural* change: this quarter's regional breakdown is
+// still plain text here, but is rewritten as a table in the other
+// version -- see the README's "Known limitations" for how the diff
+// handles two versions of the same information in unrelated shapes (it
+// can't tell they're "the same content reformatted": text and a table
+// share no comparable atoms, so this whole paragraph is struck through
+// and the whole table is inserted, with nothing in between).
+Regional highlights: North grew by 5%, South grew by 8%, and East grew
+by 3%.

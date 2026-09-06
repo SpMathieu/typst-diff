@@ -151,12 +151,14 @@ typst-diff/
 ├── README.md           # this file
 ├── examples/
 │   ├── old/             # example: old version of a small project
-│   │   ├── data.json     # data loaded via an absolute path
+│   │   ├── data.json     # a single JSON object, loaded via an absolute path
+│   │   ├── items.json    # a JSON *array*, loaded from items.typ below
 │   │   ├── lib/
 │   │   │   └── report.typ  # imported via an absolute path
 │   │   └── src/
 │   │       ├── main.typ         # entry point compared by typst-diff
-│   │       └── confidential.typ # included via a relative path
+│   │       ├── confidential.typ # included via a relative path
+│   │       └── items.typ        # included via a relative path
 │   └── new/             # example: new version of the same project
 │       └── ...           # same layout, updated content throughout
 └── src/
@@ -228,6 +230,54 @@ typst-diff/
   even totally different text can appear to partially align). The
   "Dupont Inc." → "Martin & Co." client name in the examples exercises
   this fallback deliberately, right next to the cases that do recurse.
+- **Tables are diffed row by row, matched by *position* — not by
+  content**: unlike the `BodyElement` wrapper elements (one `body` each),
+  a table is *many* bodies (one per cell) that need to be grouped into
+  rows first, so it gets its own function, `recurse_into_table()`: row 1
+  of the old table is compared against row 1 of the new one, row 2
+  against row 2, and so on — deliberately a plain positional comparison,
+  not a search for which old row "best matches" which new row by content
+  (an earlier version tried that with a content-based Myers diff over
+  rows; it broke down as soon as *every* row's value changed at once,
+  with no unchanged row left to anchor the alignment, falling back to
+  stacking the whole old table on top of the whole new one instead of
+  showing in-place edits). Each pair of rows at the same position is then
+  diffed cell by cell (each cell recursed into via `diff_content`, so an
+  edited value stays a word-level diff inside that one cell), *unless*
+  the two rows share no whole cell at all, in which case the old row is
+  struck through and the new one inserted right after it rather than
+  scrambling two unrelated rows together — see `row_shares_content()`
+  (whole-cell matching, not word-level: two unrelated percentages sharing
+  the literal "%" doesn't count as the row having something in common).
+  Extra rows past the shorter table's length are likewise whole-row
+  deletions/insertions. `examples/*/items.json` exercises all of this at
+  once: values edited in place, a row with nothing in common with its
+  counterpart, a truly identical row, and a trailing insertion.
+
+  This only handles the common case, though: `recurse_into_table()` gives
+  up (falling back to the plain whole-table swap) if the two tables were
+  given a different `columns` layout, or either uses
+  `table.hline`/`table.vline` (manually placed lines have no well-defined
+  place to end up once rows shift around them) — see `table_cells()`'s
+  doc comment. It also always keeps the *new* table's
+  `table.header`/`table.footer` as-is rather than diffing them. And since
+  rows are matched purely by position, a row inserted or removed anywhere
+  but the end shifts the pairing for every row after it (there's no
+  attempt to detect that rows moved) — the "shares a word"/"shares a
+  cell" guards only stop unrelated *paired* rows from being scrambled
+  together, they don't recover the "really" corresponding rows once
+  positions have shifted.
+- **A structural change (e.g. text → table) is an unrelated
+  delete-then-insert, not a "reformat"**: the diff has no concept of "this
+  paragraph became a table with the same information" — a run of text and
+  a table share no comparable atoms at all (see `atom_key`), so the whole
+  old paragraph is struck through and the whole new table is inserted
+  right after it, same as any other two completely unrelated pieces of
+  content replacing each other. This is arguably the *correct* behavior
+  (there's no meaningful word-level correspondence to show), just worth
+  knowing about — see the "Regional highlights" paragraph/table pair at
+  the end of `examples/*/src/main.typ` for what this looks like in
+  practice.
 - **Single layout pass**: Typst normally re-runs layout several times to
   stabilize cross-references (table of contents, counters...). This
   project only does a single pass — plenty to try out the idea, but worth
