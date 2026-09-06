@@ -6,20 +6,29 @@ use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
 use similar::{capture_diff_slices, Algorithm, DiffOp};
-use typst::foundations::{Content, NativeElement, SequenceElem, StyledElem};
+use typst::foundations::{Content, NativeElement, SequenceElem, StyledElem, Styles};
 use typst::text::{StrikeElem, TextElem, UnderlineElem};
 use typst::visualize::Color;
 
-/// A minimal, comparable unit of content.
+/// A minimal, comparable unit of content, together with the styles
+/// (`#set`/`#show` properties, e.g. color, weight, italics...) that were
+/// applied to it via its ancestor `StyledElem`s in the document it came
+/// from.
+///
+/// The styles are carried along purely to be *reapplied* when
+/// reconstructing the annotated output (see `atom_to_content`) — they play
+/// no part in matching atoms between the old and new document (see
+/// `atom_key`), so a pure style change on otherwise-identical text is
+/// still recognized as "the same atom" by the diff.
 #[derive(Clone)]
 pub enum Atom {
     /// A word or a punctuation mark.
-    Word(String),
+    Word(String, Styles),
     /// A space or line break.
-    Space,
+    Space(Styles),
     /// Any other "leaf" element (image, equation, etc.), treated as an
     /// indivisible atomic block.
-    Leaf(Content),
+    Leaf(Content, Styles),
 }
 
 /// Returns a canonical string used to compare atoms for equality/ordering.
@@ -27,12 +36,14 @@ pub enum Atom {
 /// `Content` doesn't implement `Eq`/`Hash`/`Ord` (it can hold floats and
 /// other non-orderable data), so `Leaf` atoms are compared through their
 /// `Debug` representation instead, which is a reasonable structural-equality
-/// proxy for a diffing tool like this one.
+/// proxy for a diffing tool like this one. Styles are deliberately left out
+/// of the key: two atoms with the same text/content but different styling
+/// are still considered the same atom (see the `Atom` docs).
 fn atom_key(atom: &Atom) -> String {
     match atom {
-        Atom::Word(w) => format!("W:{w}"),
-        Atom::Space => "S".to_string(),
-        Atom::Leaf(c) => format!("L:{c:?}"),
+        Atom::Word(w, _) => format!("W:{w}"),
+        Atom::Space(_) => "S".to_string(),
+        Atom::Leaf(c, _) => format!("L:{c:?}"),
     }
 }
 
@@ -63,16 +74,17 @@ impl Ord for Atom {
 }
 
 /// Recursively walks a `Content` and produces the flat list of its atoms,
-/// in order of appearance.
+/// in order of appearance, each carrying the styles in effect where it was
+/// found.
 pub fn flatten(content: &Content) -> Vec<Atom> {
     let mut atoms = Vec::new();
-    collect(content, &mut atoms);
+    collect(content, Styles::new(), &mut atoms);
     atoms
 }
 
-fn collect(content: &Content, atoms: &mut Vec<Atom>) {
+fn collect(content: &Content, styles: Styles, atoms: &mut Vec<Atom>) {
     if let Some(text) = content.to_packed::<TextElem>() {
-        for token in tokenize(text.text.as_str()) {
+        for token in tokenize(text.text.as_str(), &styles) {
             atoms.push(token);
         }
         return;
@@ -80,16 +92,21 @@ fn collect(content: &Content, atoms: &mut Vec<Atom>) {
 
     if let Some(seq) = content.to_packed::<SequenceElem>() {
         for child in &seq.children {
-            collect(child, atoms);
+            collect(child, styles.clone(), atoms);
         }
         return;
     }
 
     if let Some(styled) = content.to_packed::<StyledElem>() {
-        // Styles are ignored for now: we just descend into the child.
-        // (Known limitation: a pure style change, without a text change,
-        // won't be detected by this diff.)
-        collect(&styled.child, atoms);
+        // Accumulate this level's styles into the ones inherited from
+        // outer ancestors, with the same precedence a real style chain
+        // would give them (this element's own styles are more specific,
+        // so they must win over `styles` for any property both set) —
+        // see `Styles::apply`'s doc/behavior for why the "outer" argument
+        // ends up on the *lower*-precedence side of the merge.
+        let mut merged = styled.styles.clone();
+        merged.apply(styles);
+        collect(&styled.child, merged, atoms);
         return;
     }
 
@@ -100,46 +117,72 @@ fn collect(content: &Content, atoms: &mut Vec<Atom>) {
     // To refine this, add a case here for each element type you want to
     // "traverse" (StrongElem, EmphElem, LinkMarker, etc.), following the
     // SequenceElem/StyledElem cases above.
-    atoms.push(Atom::Leaf(content.clone()));
+    atoms.push(Atom::Leaf(content.clone(), styles));
 }
 
-fn tokenize(s: &str) -> Vec<Atom> {
+fn tokenize(s: &str, styles: &Styles) -> Vec<Atom> {
     let mut out = Vec::new();
     let mut current = String::new();
     for ch in s.chars() {
         if ch.is_whitespace() {
             if !current.is_empty() {
-                out.push(Atom::Word(std::mem::take(&mut current)));
+                out.push(Atom::Word(std::mem::take(&mut current), styles.clone()));
             }
-            out.push(Atom::Space);
+            out.push(Atom::Space(styles.clone()));
         } else {
             current.push(ch);
         }
     }
     if !current.is_empty() {
-        out.push(Atom::Word(current));
+        out.push(Atom::Word(current, styles.clone()));
     }
     out
 }
 
-fn atom_to_content(atom: &Atom) -> Content {
+/// The atom's own content, without its carried styles reapplied yet.
+fn atom_base_content(atom: &Atom) -> Content {
     match atom {
-        Atom::Word(w) => TextElem::packed(w.clone()),
-        Atom::Space => TextElem::packed(" "),
-        Atom::Leaf(c) => c.clone(),
+        Atom::Word(w, _) => TextElem::packed(w.clone()),
+        Atom::Space(_) => TextElem::packed(" "),
+        Atom::Leaf(c, _) => c.clone(),
     }
 }
 
-/// Wraps deleted content: struck through and red.
-fn wrap_deleted(c: Content) -> Content {
-    StrikeElem::new(c.clone().styled(TextElem::fill.set(Color::RED.into())))
-        .pack()
+/// The styles carried by the atom (see the `Atom` docs).
+fn atom_styles(atom: &Atom) -> &Styles {
+    match atom {
+        Atom::Word(_, s) | Atom::Space(s) | Atom::Leaf(_, s) => s,
+    }
 }
 
-/// Wraps added content: underlined and blue.
-fn wrap_added(c: Content) -> Content {
-    UnderlineElem::new(c.clone().styled(TextElem::fill.set(Color::BLUE.into())))
-        .pack()
+/// Rebuilds an atom's content exactly as it appeared in its source
+/// document, styles included.
+fn atom_to_content(atom: &Atom) -> Content {
+    atom_base_content(atom).styled_with_map(atom_styles(atom).clone())
+}
+
+/// Wraps a deleted atom: struck through and red, keeping its own styles
+/// (e.g. weight, italics) for everything strikethrough/red doesn't
+/// override.
+///
+/// The red fill is applied to the *base* content before the atom's own
+/// styles are layered on top, so it ends up as the most specific (highest
+/// priority) style — it's the whole point of the highlighting that it
+/// stays visible no matter what color the surrounding document set.
+fn wrap_deleted(atom: &Atom) -> Content {
+    let content = atom_base_content(atom)
+        .styled(TextElem::fill.set(Color::RED.into()))
+        .styled_with_map(atom_styles(atom).clone());
+    StrikeElem::new(content).pack()
+}
+
+/// Wraps an added atom: underlined and blue. See `wrap_deleted` for why
+/// the color is applied before the atom's own styles.
+fn wrap_added(atom: &Atom) -> Content {
+    let content = atom_base_content(atom)
+        .styled(TextElem::fill.set(Color::BLUE.into()))
+        .styled_with_map(atom_styles(atom).clone());
+    UnderlineElem::new(content).pack()
 }
 
 /// Controls how deletions and additions are rendered in the annotated
@@ -167,6 +210,16 @@ impl Default for DiffOptions {
 /// underlined in blue. `options` lets the caller turn either annotation off:
 /// - hidden deletions are omitted from the output entirely,
 /// - hidden additions are kept, but rendered in standard style.
+///
+/// Styling rule: the *new* document's style always wins. Unchanged text
+/// (present in both versions) is rendered with the styles it has in the
+/// new document, even if only its styling (not its text) changed — so a
+/// pure style change is invisible in the diff (the "Known limitations"
+/// section of the README explains why: `collect()` only recognizes atoms
+/// as "the same" by their text/content, not by their styles), but at
+/// least the surviving text always looks like the new document intends.
+/// Deleted text (which has no counterpart in the new document) keeps
+/// whatever styling it had in the old document.
 pub fn diff_content(old: &Content, new: &Content, options: DiffOptions) -> Content {
     let atoms_old = flatten(old);
     let atoms_new = flatten(new);
@@ -176,19 +229,21 @@ pub fn diff_content(old: &Content, new: &Content, options: DiffOptions) -> Conte
     let mut result = Vec::new();
     let push_deleted = |result: &mut Vec<Content>, atom: &Atom| {
         if options.show_deletions {
-            result.push(wrap_deleted(atom_to_content(atom)));
+            result.push(wrap_deleted(atom));
         }
     };
     let push_added = |result: &mut Vec<Content>, atom: &Atom| {
-        let content = atom_to_content(atom);
-        result.push(if options.show_additions { wrap_added(content) } else { content });
+        result.push(if options.show_additions { wrap_added(atom) } else { atom_to_content(atom) });
     };
 
     for op in ops {
         match op {
-            DiffOp::Equal { old_index, len, .. } => {
+            DiffOp::Equal { new_index, len, .. } => {
+                // Unchanged text still comes from the *new* document, so
+                // that a pure style change (e.g. this run turning bold)
+                // is reflected even though the diff doesn't flag it.
                 for i in 0..len {
-                    result.push(atom_to_content(&atoms_old[old_index + i]));
+                    result.push(atom_to_content(&atoms_new[new_index + i]));
                 }
             }
             DiffOp::Delete { old_index, old_len, .. } => {

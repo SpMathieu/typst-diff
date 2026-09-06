@@ -21,7 +21,7 @@
 // Same rule applies to any path-taking function, like `json()`.
 #let data = json("/data.json")
 
-= Quarterly Report
+= Quarter Report
 
 #summary(data)
 

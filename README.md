@@ -179,18 +179,25 @@ typst-diff/
   `typst-kit` if you need to add that. For a fully-featured `World`
   (packages included), look at `typst-cli`'s `SystemWorld` instead (see
   the Typst GitHub repo, `crates/typst-cli/src/world.rs`).
-- **Style is entirely style-blind, not just for changes**: `collect()` (in
-  `src/diff.rs`) flattens a `StyledElem` by descending into its child and
-  discarding the style itself, so `text(fill: ..., weight: ..., style:
-  ...)[...]` content loses its color/weight/italics in the annotated
-  output even when nothing about it changed — see `examples/old/main.typ`
-  and `examples/new/main.typ` for a demonstration (their `Confidential`
-  line). A *pure* style change made via an element that isn't traversed by
-  `collect()` (e.g. wrapping text in `strong()` in one version but not the
-  other, as the `status` variable in the examples does) is treated as a
-  totally different atom instead: the diff shows a full delete of the old,
-  plain version followed by a full insert of the new, bold one, rather
-  than flagging just the formatting as changed.
+- **Style follows the new document, but pure style changes aren't
+  flagged**: `collect()` (in `src/diff.rs`) carries each atom's styles
+  (color, weight, italics...) along as it flattens a `StyledElem`, and
+  `diff_content()` always reapplies the *new* document's styles to
+  unchanged text — so `text(fill: ..., weight: ..., style: ...)[...]`
+  content renders correctly even when the diff has nothing to say about
+  it (see `examples/*/src/confidential.typ`'s `Confidential` line).
+  What this doesn't do is *flag* a pure style change as a change: since
+  `atom_key()` deliberately ignores styles when matching atoms between
+  versions (so text isn't wrongly treated as deleted+re-added just
+  because its color changed), a paragraph that only turned bold looks
+  identical to the diff — it's shown correctly styled, just without a
+  strikethrough/underline marker anywhere. Separately, a style change
+  made via an element `collect()` doesn't traverse (e.g. wrapping text in
+  `strong()` in one version but not the other, as `status` in the
+  examples does) is a different case entirely: `strong(...)` and plain
+  text become different *kinds* of atoms (a `Leaf` vs `Word`s), so they
+  never match, and the diff shows a full delete of the old, plain version
+  followed by a full insert of the new, bold one.
 - **Word-by-word diff only within raw text**: content inside elements like
   `strong()`/`emph()`/links is treated as a
   single block rather than being diffed word by word internally. See the
