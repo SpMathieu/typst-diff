@@ -2,13 +2,14 @@
 // multi-file Typst project:
 //
 //   new/
-//   ├── data.json           <- the JSON export this report reads
-//   ├── items.json          <- a JSON *array*, read by items.typ below
-//   ├── lib/report.typ      <- imported below by an *absolute* path
+//   ├── data.json            <- the JSON export this report reads
+//   ├── items.json           <- a JSON *array*, read by both files below
+//   ├── lib/report.typ       <- imported below by an *absolute* path
 //   └── src/
-//       ├── main.typ         <- this file
-//       ├── confidential.typ <- pulled in below by a *relative* path
-//       └── items.typ        <- pulled in below by a *relative* path
+//       ├── main.typ          <- this file
+//       ├── confidential.typ  <- pulled in below by a *relative* path
+//       ├── items.typ         <- pulled in below by a *relative* path
+//       └── items_by_table.typ <- pulled in below by a *relative* path
 //
 // Since this file lives one level down from the project root (in src/),
 // run typst-diff with `--old-root`/`--new-root` pointing at "examples/old"
@@ -44,6 +45,11 @@ _highly transparent_. Full details are available on
 // A department-by-department breakdown, loaded and rendered by
 // items.typ (its own include, its own JSON file).
 #include "./items.typ"
+
+// The exact same data again, but this time as one small table *per*
+// department instead of one shared table -- see items_by_table.typ for
+// how that changes the way the diff aligns and marks the changes.
+#include "./items_by_table.typ"
 
 // Proof of a *structural* change: this quarter's regional breakdown was
 // plain text in the other version, rewritten as a table here -- see the

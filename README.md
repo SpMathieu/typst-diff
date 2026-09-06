@@ -152,13 +152,14 @@ typst-diff/
 ├── examples/
 │   ├── old/             # example: old version of a small project
 │   │   ├── data.json     # a single JSON object, loaded via an absolute path
-│   │   ├── items.json    # a JSON *array*, loaded from items.typ below
+│   │   ├── items.json    # a JSON *array*, read by both files below
 │   │   ├── lib/
 │   │   │   └── report.typ  # imported via an absolute path
 │   │   └── src/
-│   │       ├── main.typ         # entry point compared by typst-diff
-│   │       ├── confidential.typ # included via a relative path
-│   │       └── items.typ        # included via a relative path
+│   │       ├── main.typ            # entry point compared by typst-diff
+│   │       ├── confidential.typ    # included via a relative path
+│   │       ├── items.typ           # included via a relative path
+│   │       └── items_by_table.typ  # included via a relative path
 │   └── new/             # example: new version of the same project
 │       └── ...           # same layout, updated content throughout
 └── src/
@@ -267,6 +268,23 @@ typst-diff/
   cell" guards only stop unrelated *paired* rows from being scrambled
   together, they don't recover the "really" corresponding rows once
   positions have shifted.
+
+  Positional matching is specific to rows *within* one table, though —
+  `examples/*/src/items_by_table.typ` renders the exact same data as
+  `items.typ`, but as a separate one-row table per department instead of
+  one shared table, and gets the *content*-based matching every other
+  top-level element gets (the same mechanism a heading or a paragraph is
+  matched by): each small table is aligned against the others by what's
+  in it, not by where it sits. On this particular data the two approaches
+  happen to reach the same visual result (compare the two tables the
+  example produces), but they get there differently, and could easily
+  diverge on data where positions and content-identity disagree — e.g. a
+  reordered list would confuse the positional version but not the
+  content-matched one, while the content-matched version could
+  misidentify an edit as an unrelated delete-then-insert if `atom_key`
+  can't find enough left in common (see `try_recurse`'s "shares a word"
+  guard) where the positional version, having nothing better to compare
+  a row against, would still pair rows up and diff them in place.
 - **A structural change (e.g. text → table) is an unrelated
   delete-then-insert, not a "reformat"**: the diff has no concept of "this
   paragraph became a table with the same information" — a run of text and
