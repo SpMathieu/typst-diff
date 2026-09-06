@@ -1,5 +1,8 @@
 /target
 
+# Generated output from running the tool (e.g. `cargo run -- ... diff.pdf`)
+/diff.pdf
+
 # OS / editor cruft
 .DS_Store
 *.swp

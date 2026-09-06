@@ -71,8 +71,10 @@ From the `typst-diff/` folder:
 # Check that it builds (fast, doesn't produce an optimized binary)
 cargo check
 
-# Build and run on the two example files provided
-cargo run --release -- examples/old.typ examples/new.typ diff.pdf
+# Build and run on the two example projects provided (see "Multi-file
+# projects" below for why --old-root/--new-root are needed here)
+cargo run --release -- examples/old/src/main.typ examples/new/src/main.typ \
+  diff.pdf --old-root examples/old --new-root examples/new
 ```
 
 The `diff.pdf` file is created in the current folder. Open it to see the
@@ -89,15 +91,57 @@ Two flags let you control what the annotated PDF shows:
 
 ```bash
 # Hide deleted content entirely (no strikethrough text at all)
-cargo run --release -- examples/old.typ examples/new.typ diff.pdf --hide-deletions
+cargo run --release -- examples/old/src/main.typ examples/new/src/main.typ \
+  diff.pdf --old-root examples/old --new-root examples/new --hide-deletions
 
 # Show added content in standard style (no underline/blue), as if it were
 # unchanged text
-cargo run --release -- examples/old.typ examples/new.typ diff.pdf --hide-additions
+cargo run --release -- examples/old/src/main.typ examples/new/src/main.typ \
+  diff.pdf --old-root examples/old --new-root examples/new --hide-additions
 
 # Combine both: a "clean" preview of the new document only
-cargo run --release -- examples/old.typ examples/new.typ diff.pdf --hide-deletions --hide-additions
+cargo run --release -- examples/old/src/main.typ examples/new/src/main.typ \
+  diff.pdf --old-root examples/old --new-root examples/new \
+  --hide-deletions --hide-additions
 ```
+
+### Multi-file projects
+
+A real Typst document is rarely a single file: it typically `#include`s or
+`#import`s other local `.typ` files, and loads data/images by path. Both
+example projects are laid out this way to demonstrate it:
+
+```
+examples/old/            (examples/new/ mirrors this exactly)
+├── data.json             # loaded from src/main.typ via an absolute path
+├── lib/
+│   └── report.typ        # a `summary()` function, imported absolutely
+└── src/
+    ├── main.typ           # the file you actually pass to typst-diff
+    └── confidential.typ   # pulled in via a *relative* path
+```
+
+Typst resolves paths in a `.typ` file one of two ways:
+- **`/leading/slash`** — an absolute path, resolved against the **project
+  root** (wherever `--root` points, in real `typst`; here,
+  `--old-root`/`--new-root`), regardless of which file it's written in.
+- **`./relative`** or **`bare/relative`** — resolved against the
+  **directory of the file that contains it**, regardless of where the
+  project root is.
+
+Since `examples/old/src/main.typ` sits one level below its project root
+(`examples/old/`), its `#import "/lib/report.typ": summary` and
+`json("/data.json")` calls need that root to be told explicitly —
+otherwise they'd (wrongly) resolve against `src/` instead, where those
+files don't exist. Its `#include "./confidential.typ"`, on the other hand,
+works regardless of the root, since it's resolved against `src/` either
+way. Run without `--old-root`/`--new-root` to see the resulting "file not
+found" error for yourself.
+
+If your own project's entry point already sits at your project's root,
+you can just omit `--old-root`/`--new-root` — they default to the
+respective input file's own directory, exactly like `typst compile`
+without `--root` does.
 
 ## 4. Project structure
 
@@ -106,8 +150,15 @@ typst-diff/
 ├── Cargo.toml          # dependencies
 ├── README.md           # this file
 ├── examples/
-│   ├── old.typ          # example: old version
-│   └── new.typ          # example: new version
+│   ├── old/             # example: old version of a small project
+│   │   ├── data.json     # data loaded via an absolute path
+│   │   ├── lib/
+│   │   │   └── report.typ  # imported via an absolute path
+│   │   └── src/
+│   │       ├── main.typ         # entry point compared by typst-diff
+│   │       └── confidential.typ # included via a relative path
+│   └── new/             # example: new version of the same project
+│       └── ...           # same layout, updated content throughout
 └── src/
     ├── main.rs          # entry point: CLI, orchestration
     ├── world.rs         # minimal implementation of `typst::World`
@@ -116,14 +167,32 @@ typst-diff/
 
 ## 5. Known limitations (possible improvements)
 
-- **Single file only**: `SimpleWorld` (in `world.rs`) doesn't support
-  `#include`, images, or packages (`#import "@preview/..."`). For a real
-  multi-file project, you'd need a more complete `World` implementation,
-  along the lines of `typst-cli`'s `SystemWorld` (see the Typst GitHub
-  repo, `crates/typst-cli/src/world.rs`).
-- **Word-by-word diff only within raw text**: pure style changes (e.g. a
-  word becoming bold without changing its text) are not detected, and
-  content inside elements like `strong()`/`emph()`/links is treated as a
+- **Local multi-file projects work, packages don't**: `SimpleWorld` (in
+  `world.rs`) reads any file the project references — `#include
+  "other.typ"`, `#import "/lib/helpers.typ": foo`, `json("/data.json")`,
+  `image("logo.png")`... — from the real filesystem, both absolute
+  (`/...`) and relative (`./...`) paths, resolved exactly like real
+  `typst` does (see "Multi-file projects" above for the resolution rules
+  and the `--old-root`/`--new-root` flags). It does **not** support
+  packages (`#import "@preview/...": ..."`), since that needs a package
+  downloader/cache with network access — see `PackageStorage` in
+  `typst-kit` if you need to add that. For a fully-featured `World`
+  (packages included), look at `typst-cli`'s `SystemWorld` instead (see
+  the Typst GitHub repo, `crates/typst-cli/src/world.rs`).
+- **Style is entirely style-blind, not just for changes**: `collect()` (in
+  `src/diff.rs`) flattens a `StyledElem` by descending into its child and
+  discarding the style itself, so `text(fill: ..., weight: ..., style:
+  ...)[...]` content loses its color/weight/italics in the annotated
+  output even when nothing about it changed — see `examples/old/main.typ`
+  and `examples/new/main.typ` for a demonstration (their `Confidential`
+  line). A *pure* style change made via an element that isn't traversed by
+  `collect()` (e.g. wrapping text in `strong()` in one version but not the
+  other, as the `status` variable in the examples does) is treated as a
+  totally different atom instead: the diff shows a full delete of the old,
+  plain version followed by a full insert of the new, bold one, rather
+  than flagging just the formatting as changed.
+- **Word-by-word diff only within raw text**: content inside elements like
+  `strong()`/`emph()`/links is treated as a
   single block rather than being diffed word by word internally. See the
   comments in `src/diff.rs`, function `collect()`, for where to extend this
   behavior.

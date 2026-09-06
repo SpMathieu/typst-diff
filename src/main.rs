@@ -35,19 +35,33 @@ struct Args {
     /// when set, new content is rendered in standard style
     #[arg(long)]
     hide_additions: bool,
+    /// Project root for the old file, used to resolve its absolute paths
+    /// (`/lib/helpers.typ`, `json("/data.json")`...). Defaults to the old
+    /// file's parent directory -- pass this explicitly when it lives in a
+    /// subdirectory of the actual project root
+    #[arg(long)]
+    old_root: Option<PathBuf>,
+    /// Project root for the new file (see `--old-root`)
+    #[arg(long)]
+    new_root: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let old_text = std::fs::read_to_string(&args.old)
-        .with_context(|| format!("reading {:?}", args.old))?;
-    let new_text = std::fs::read_to_string(&args.new)
-        .with_context(|| format!("reading {:?}", args.new))?;
+    // Canonicalized (absolute, symlink-resolved) so that, whatever form
+    // the user spelled `old`/`new`/`--old-root`/`--new-root` in, the main
+    // file path always lexically prefixes its project root the same way
+    // -- required by `VirtualPath::virtualize` in `world.rs`.
+    let old_main = canonicalize(&args.old)?;
+    let new_main = canonicalize(&args.new)?;
+    let old_root = resolve_root(&old_main, args.old_root.as_deref())?;
+    let new_root = resolve_root(&new_main, args.new_root.as_deref())?;
 
-    // One Typst "world" per version: each has its own in-memory source.
-    let world_old = SimpleWorld::new(old_text);
-    let world_new = SimpleWorld::new(new_text);
+    // One Typst "world" per version: each has its own in-memory source,
+    // rooted at its own project root.
+    let world_old = SimpleWorld::new(&old_main, &old_root)?;
+    let world_new = SimpleWorld::new(&new_main, &new_root)?;
 
     let content_old = eval_to_content(&world_old)?;
     let content_new = eval_to_content(&world_new)?;
@@ -72,6 +86,22 @@ fn main() -> Result<()> {
 
     println!("Diff PDF written to {:?}", args.output);
     Ok(())
+}
+
+/// Canonicalizes a path (resolves it to an absolute path with symlinks and
+/// `.`/`..` components resolved away), with a friendly error on failure.
+fn canonicalize(path: &std::path::Path) -> Result<PathBuf> {
+    path.canonicalize().with_context(|| format!("reading {path:?}"))
+}
+
+/// Resolves the real project root for an already-canonicalized `.typ` file
+/// path: either the explicit `--old-root`/`--new-root` the user passed
+/// (canonicalized too), or, by default, the file's own parent directory.
+fn resolve_root(main_path: &std::path::Path, explicit_root: Option<&std::path::Path>) -> Result<PathBuf> {
+    match explicit_root {
+        Some(root) => root.canonicalize().with_context(|| format!("resolving project root {root:?}")),
+        None => Ok(main_path.parent().expect("a canonical file path has a parent").to_path_buf()),
+    }
 }
 
 /// Evaluates a world's source file and returns the resolved `Content`
