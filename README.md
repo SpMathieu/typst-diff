@@ -353,3 +353,8 @@ was written. In order:
 4. Adjust field/parameter names accordingly — the project's logic (flatten
    → diff → rebuild) won't change, only the "plumbing" for accessing
    Typst's internal structures is likely to move.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE) — the same
+license Typst itself uses.
