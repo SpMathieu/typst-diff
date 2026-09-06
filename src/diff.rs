@@ -142,16 +142,48 @@ fn wrap_added(c: Content) -> Content {
         .pack()
 }
 
+/// Controls how deletions and additions are rendered in the annotated
+/// output.
+#[derive(Clone, Copy)]
+pub struct DiffOptions {
+    /// If `false`, deleted content is dropped entirely instead of being
+    /// shown struck through in red.
+    pub show_deletions: bool,
+    /// If `false`, added content is rendered in standard style (no
+    /// underline, no color change) instead of underlined in blue.
+    pub show_additions: bool,
+}
+
+impl Default for DiffOptions {
+    fn default() -> Self {
+        Self { show_deletions: true, show_additions: true }
+    }
+}
+
 /// Computes the diff between two `Content`s and returns a new, annotated
-/// `Content` (deletions struck through in red, additions underlined in
-/// blue).
-pub fn diff_content(old: &Content, new: &Content) -> Content {
+/// `Content`.
+///
+/// By default, deletions are struck through in red and additions are
+/// underlined in blue. `options` lets the caller turn either annotation off:
+/// - hidden deletions are omitted from the output entirely,
+/// - hidden additions are kept, but rendered in standard style.
+pub fn diff_content(old: &Content, new: &Content, options: DiffOptions) -> Content {
     let atoms_old = flatten(old);
     let atoms_new = flatten(new);
 
     let ops = capture_diff_slices(Algorithm::Myers, &atoms_old, &atoms_new);
 
     let mut result = Vec::new();
+    let push_deleted = |result: &mut Vec<Content>, atom: &Atom| {
+        if options.show_deletions {
+            result.push(wrap_deleted(atom_to_content(atom)));
+        }
+    };
+    let push_added = |result: &mut Vec<Content>, atom: &Atom| {
+        let content = atom_to_content(atom);
+        result.push(if options.show_additions { wrap_added(content) } else { content });
+    };
+
     for op in ops {
         match op {
             DiffOp::Equal { old_index, len, .. } => {
@@ -161,21 +193,21 @@ pub fn diff_content(old: &Content, new: &Content) -> Content {
             }
             DiffOp::Delete { old_index, old_len, .. } => {
                 for i in 0..old_len {
-                    result.push(wrap_deleted(atom_to_content(&atoms_old[old_index + i])));
+                    push_deleted(&mut result, &atoms_old[old_index + i]);
                 }
             }
             DiffOp::Insert { new_index, new_len, .. } => {
                 for i in 0..new_len {
-                    result.push(wrap_added(atom_to_content(&atoms_new[new_index + i])));
+                    push_added(&mut result, &atoms_new[new_index + i]);
                 }
             }
             DiffOp::Replace { old_index, old_len, new_index, new_len } => {
                 // A modification = deletion of the old + addition of the new.
                 for i in 0..old_len {
-                    result.push(wrap_deleted(atom_to_content(&atoms_old[old_index + i])));
+                    push_deleted(&mut result, &atoms_old[old_index + i]);
                 }
                 for i in 0..new_len {
-                    result.push(wrap_added(atom_to_content(&atoms_new[new_index + i])));
+                    push_added(&mut result, &atoms_new[new_index + i]);
                 }
             }
         }

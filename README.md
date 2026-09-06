@@ -83,6 +83,22 @@ blue.
 *builds* faster in debug — to iterate on errors, `cargo check` without
 `--release` is enough and is faster).
 
+### Showing/hiding deletions and additions
+
+Two flags let you control what the annotated PDF shows:
+
+```bash
+# Hide deleted content entirely (no strikethrough text at all)
+cargo run --release -- examples/old.typ examples/new.typ diff.pdf --hide-deletions
+
+# Show added content in standard style (no underline/blue), as if it were
+# unchanged text
+cargo run --release -- examples/old.typ examples/new.typ diff.pdf --hide-additions
+
+# Combine both: a "clean" preview of the new document only
+cargo run --release -- examples/old.typ examples/new.typ diff.pdf --hide-deletions --hide-additions
+```
+
 ## 4. Project structure
 
 ```

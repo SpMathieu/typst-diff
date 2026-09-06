@@ -13,6 +13,7 @@ use typst::utils::Protected;
 use typst::World;
 use typst_layout::PagedDocument;
 
+use crate::diff::DiffOptions;
 use crate::world::SimpleWorld;
 
 /// Compares two versions of a Typst document and produces an annotated PDF
@@ -26,6 +27,14 @@ struct Args {
     /// Output PDF file
     #[arg(default_value = "diff.pdf")]
     output: PathBuf,
+    /// Don't show deleted content at all (by default, it's struck through
+    /// in red)
+    #[arg(long)]
+    hide_deletions: bool,
+    /// Don't highlight added content (by default, it's underlined in blue);
+    /// when set, new content is rendered in standard style
+    #[arg(long)]
+    hide_additions: bool,
 }
 
 fn main() -> Result<()> {
@@ -44,7 +53,11 @@ fn main() -> Result<()> {
     let content_new = eval_to_content(&world_new)?;
 
     // Computes the annotated Content (a "track changes"-style diff).
-    let annotated = diff::diff_content(&content_old, &content_new);
+    let diff_options = DiffOptions {
+        show_deletions: !args.hide_deletions,
+        show_additions: !args.hide_additions,
+    };
+    let annotated = diff::diff_content(&content_old, &content_new, diff_options);
 
     // Lays out this annotated content, reusing the "world" of the new
     // version (for fonts, the standard library, etc.)
