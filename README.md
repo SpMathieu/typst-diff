@@ -326,10 +326,70 @@ typst-diff/
   knowing about — see the "Regional highlights" paragraph/table pair at
   the end of `examples/*/src/main.typ` for what this looks like in
   practice.
-- **Single layout pass**: Typst normally re-runs layout several times to
-  stabilize cross-references (table of contents, counters...). This
-  project only does a single pass — plenty to try out the idea, but worth
-  revisiting for complex documents with lots of cross-references.
+- **Page header/footer are diffed once for the whole document, not per
+  word — and only when they're set once, near the top**: `#set
+  page(header: ..., footer: ...)` (and any other page-construction
+  property: `margin`, `numbering`, `paper`...) doesn't produce ordinary
+  Content the way a paragraph does — it's a *style* property (`PageElem`
+  in typst-library), invisible to `collect()`'s usual
+  flatten-into-comparable-atoms traversal in `src/diff.rs`. Early on, this
+  project just let it ride along like any other style (`text(fill:
+  ...)`, `emph()`...), carried on every individual atom for
+  `atom_to_content`/`wrap_deleted`/`wrap_added` to reapply when
+  reconstructing the annotated output. That silently dropped header/
+  footer changes from the diff entirely (whichever the *last*-styled atom
+  happened to carry is what showed, on every page) — and, worse, since a
+  page property really did differ between the struck-through old atoms
+  and the underlined new ones, Typst inserted an automatic page break at
+  every single boundary where the two disagreed, fragmenting the whole
+  document into roughly one page per changed word. `collect()` now
+  strips `PageElem` properties out of what it carries per atom; `main.rs`
+  diffs the header/footer content separately (`root_styles`/
+  `diff_page_marginalia` in `src/diff.rs`) and reapplies the result once,
+  on top of the whole document, alongside the *new* document's other page
+  properties. `root_styles` finds this by walking the same nested
+  `SequenceElem`/`StyledElem` structure `collect()` does, in document
+  order — which reliably finds one `#set page(...)` wherever it sits
+  among a document's top-level content (this doesn't have to be the very
+  first statement — see `examples/*/src/main.typ`, where it comes after
+  some `#import`/`#let` lines), but doesn't attempt to make sense of
+  *several* independent `#set page(header: ...)` calls further down the
+  same document, each meant to apply to only part of it — an edge case
+  outside what this project's examples exercise.
+- **A `context [...]` expression's *body* can't be told apart from
+  another one's**: `atom_key()` falls back to a `Leaf` atom's `Debug`
+  representation to compare it across versions (see its doc comment), but
+  a `context [...]` block (what `#counter(page).display()` and similar
+  expressions expand to) is a `ContextElem` wrapping a `Func` closure, and
+  `Func`'s own `Debug` impl only ever prints `Func(..)` for an anonymous
+  closure — never what's inside it. Two *different* `context [...]`
+  bodies (say, one showing `Page X` and another showing something else
+  entirely) are therefore indistinguishable to the diff, and register as
+  "the same atom, unchanged" (see `examples/*/src/main.typ`'s footer: its
+  `context [... #counter(page).display() ...]` is intentionally identical
+  code in both versions, which is the only case this can be relied on to
+  render sensibly). What still works well is the common case demonstrated
+  there: a `#counter()`/`context` expression is normally surrounded by
+  ordinary text (`"Page "`, `" of "`...), and *that* text diffs correctly
+  word by word — it's only a change to what the counter/context
+  expression itself computes that goes unnoticed.
+- **Layout now stabilizes across multiple passes — evaluation still
+  doesn't**: Typst normally re-runs layout several times so
+  introspection-dependent content (a table of contents,
+  `#counter(page).final()`, "as seen on page N" cross-references...) can settle once the
+  document's page count and every element's final location are known —
+  `layout()` in `src/main.rs` now mirrors the `typst` crate's own
+  `compile_impl` stabilization loop for this (re-laying out the same
+  `Content` with each pass's own `Introspector` fed into the next, up to
+  `MAX_ITERS` times, via `comemo::Constraint` to detect when a pass no
+  longer depends on anything that changed since the last one) — this is
+  what makes `examples/*/src/main.typ`'s `counter(page).final()` (used in
+  "Page X of Y") resolve correctly. `eval_to_content`, however, still
+  only evaluates once, with no introspector at all — fine for the vast
+  majority of documents, whose *content* (as opposed to its later layout)
+  doesn't depend on page counts or element positions, but not a full
+  port of `compile_impl`'s loop (which re-evaluates together with
+  re-laying-out) for the rare document that needs it.
 
 ## If `cargo build` fails
 

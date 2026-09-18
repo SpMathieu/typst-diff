@@ -6,7 +6,10 @@ use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
 use similar::{capture_diff_slices, Algorithm, DiffOp};
-use typst::foundations::{Content, NativeElement, Packed, SequenceElem, StyledElem, Styles};
+use typst::foundations::{
+    Content, NativeElement, Packed, SequenceElem, Smart, StyleChain, StyledElem, Styles,
+};
+use typst::layout::PageElem;
 use typst::model::{
     EmphElem, HeadingElem, LinkElem, StrongElem, TableCell, TableChild, TableElem, TableItem,
 };
@@ -107,7 +110,24 @@ fn collect(content: &Content, styles: Styles, atoms: &mut Vec<Atom>) {
         // so they must win over `styles` for any property both set) —
         // see `Styles::apply`'s doc/behavior for why the "outer" argument
         // ends up on the *lower*-precedence side of the merge.
-        let mut merged = styled.styles.clone();
+        //
+        // `PageElem` properties (`header`, `footer`, `margin`, `numbering`,
+        // `paper`...) are deliberately dropped here rather than carried
+        // along like any other style: unlike `text(fill: ...)` or
+        // `emph()`, a page property is page-construction state, not
+        // per-character styling. If it rode along on every atom the way
+        // `TextElem` styles do, `atom_to_content`/`wrap_deleted`/
+        // `wrap_added` would reapply it individually around each
+        // struck-through/underlined atom when rebuilding the annotated
+        // output -- and since the old and new documents' page styles
+        // (almost always) differ, Typst inserts an automatic page break
+        // wherever two adjacent atoms disagree on them, fragmenting the
+        // whole document into roughly one page per changed word. See
+        // `root_styles`/`diff_page_marginalia`, invoked once from
+        // `main.rs`, for how page properties (header/footer included) are
+        // diffed and reapplied instead -- a single time, at the top of
+        // the whole document, rather than once per atom.
+        let mut merged = strip_page_styles(styled.styles.clone());
         merged.apply(styles);
         collect(&styled.child, merged, atoms);
         return;
@@ -121,6 +141,126 @@ fn collect(content: &Content, styles: Styles, atoms: &mut Vec<Atom>) {
     // "traverse" (StrongElem, EmphElem, LinkMarker, etc.), following the
     // SequenceElem/StyledElem cases above.
     atoms.push(Atom::Leaf(content.clone(), styles));
+}
+
+/// Returns `styles` with every `PageElem`-scoped property (`header`,
+/// `footer`, `margin`, `numbering`, `paper`...) removed, leaving ordinary
+/// per-character styling (`text(fill: ...)`, `emph()`...) untouched. See
+/// `collect()`'s `StyledElem` case for why page properties can't be carried
+/// per atom the way other styles are.
+fn strip_page_styles(styles: Styles) -> Styles {
+    let mut kept = Styles::new();
+    for style in styles.iter() {
+        if style.element() != Some(PageElem::ELEM) {
+            kept.push(style.clone());
+        }
+    }
+    kept
+}
+
+/// Gathers the `#set`/constructor styles in effect for a whole document into
+/// one flat `Styles`, in the same outermost-to-innermost (later = more
+/// specific) order a real style chain would give them (see `collect()`'s
+/// `StyledElem` case) — used to read back page-level properties (`header`,
+/// `footer`...) that `collect()` deliberately strips out of the per-atom
+/// styles it produces.
+///
+/// Walks every child of a `SequenceElem` (not just the first), since a
+/// `#set page(...)` doesn't have to be the very first thing in the
+/// document — e.g. `examples/*/src/main.typ` has a few `#import`/`#let`
+/// lines (and the blank lines around them, which surface as their own
+/// leading `space`/`parbreak` content) before it. This finds a `#set
+/// page(...)` wherever it sits among a document's top-level content, but
+/// doesn't attempt to reconstruct what several independent `#set
+/// page(header: ...)` calls further down the same document, each meant to
+/// apply to only part of it, would actually resolve to page by page — an
+/// edge case outside what this project's examples exercise.
+fn root_styles(content: &Content) -> Styles {
+    if let Some(seq) = content.to_packed::<SequenceElem>() {
+        // Fold over every child in document order, each later one more
+        // specific than everything gathered so far -- a `#set page(...)`
+        // doesn't necessarily wrap the *very first* child (e.g. blank
+        // lines before it show up as their own leading `space`/`parbreak`
+        // siblings), so it has to be found wherever it sits among them,
+        // consistent with a real top-to-bottom style chain.
+        let mut acc = Styles::new();
+        for child in &seq.children {
+            let mut child_styles = root_styles(child);
+            child_styles.apply(acc);
+            acc = child_styles;
+        }
+        return acc;
+    }
+    if let Some(styled) = content.to_packed::<StyledElem>() {
+        let mut deeper = root_styles(&styled.child);
+        deeper.apply(styled.styles.clone());
+        return deeper;
+    }
+    Styles::new()
+}
+
+/// Diffs one page marginal field (`header` or `footer`) word by word, the
+/// same way any other content is diffed — so, for instance, a title that
+/// changed in the header is struck through/underlined right there in the
+/// margin, on every page, instead of just silently switching over to the
+/// new document's version. Returns `None` when neither version actually
+/// sets it (both `Smart::Auto`), so the caller leaves the new document's own
+/// base style (copied in wholesale) untouched instead of overriding it with
+/// an empty diff.
+fn diff_marginal(
+    old: &Smart<Option<Content>>,
+    new: &Smart<Option<Content>>,
+    options: DiffOptions,
+) -> Option<Smart<Option<Content>>> {
+    if matches!(old, Smart::Auto) && matches!(new, Smart::Auto) {
+        return None;
+    }
+    let old_content = match old {
+        Smart::Custom(Some(c)) => c.clone(),
+        _ => Content::empty(),
+    };
+    let new_content = match new {
+        Smart::Custom(Some(c)) => c.clone(),
+        _ => Content::empty(),
+    };
+    Some(Smart::Custom(Some(diff_content(&old_content, &new_content, options))))
+}
+
+/// Computes the `Styles` to reapply, once, on top of the fully annotated
+/// document produced by `diff_content` — the counterpart to `collect()`
+/// stripping `PageElem` properties out of each atom's own carried styles.
+///
+/// Consistent with `diff_content`'s "new document wins" rule, every page
+/// property (margin, numbering, paper...) is taken from the *new* document
+/// as-is, except `header` and `footer`, which are diffed word by word
+/// instead (see `diff_marginal`) so a changed header/footer is visibly
+/// marked up rather than just swapped in silently.
+pub fn diff_page_marginalia(old: &Content, new: &Content, options: DiffOptions) -> Styles {
+    let old_styles = root_styles(old);
+    let new_styles = root_styles(new);
+    let old_chain = StyleChain::new(&old_styles);
+    let new_chain = StyleChain::new(&new_styles);
+
+    let mut result = Styles::new();
+    for style in new_styles.iter() {
+        if style.element() == Some(PageElem::ELEM) {
+            result.push(style.clone());
+        }
+    }
+
+    let old_header = old_chain.get_ref(PageElem::header).clone();
+    let new_header = new_chain.get_ref(PageElem::header).clone();
+    if let Some(diffed) = diff_marginal(&old_header, &new_header, options) {
+        result.set(PageElem::header, diffed);
+    }
+
+    let old_footer = old_chain.get_ref(PageElem::footer).clone();
+    let new_footer = new_chain.get_ref(PageElem::footer).clone();
+    if let Some(diffed) = diff_marginal(&old_footer, &new_footer, options) {
+        result.set(PageElem::footer, diffed);
+    }
+
+    result
 }
 
 fn tokenize(s: &str, styles: &Styles) -> Vec<Atom> {

@@ -24,6 +24,37 @@
 // Same rule applies to any path-taking function, like `json()`.
 #let data = json("/data.json")
 
+// A header (repeated on every page) and a footer with a running page
+// count -- both set via #set page(...), not written as ordinary content.
+// This exercises a real limitation the diff has to work around:
+// `header`/`footer` aren't traversable Content children the way a
+// paragraph's text is -- they're *style* properties (`PageElem` in
+// typst-library, looked at via a `StyleChain`), so `collect()` (in
+// src/diff.rs) can't just walk into them the way it walks into
+// SequenceElem/StyledElem. See `root_styles`/`diff_page_marginalia` in
+// src/diff.rs for how they're extracted, diffed, and reapplied once for
+// the whole document, instead of riding along on every individual atom
+// the way an ordinary style (`text(fill: ...)`, `emph()`...) does --
+// carrying a *page*-level property per atom is exactly what used to
+// blow this up into one page per changed word (see the "Known
+// limitations" section of the README for the full story).
+//
+// The header's title/status/date differ between the two versions
+// (diffed word by word, right there in the margin, like any other
+// text); the footer's "Page X of Y" is the exact same code in both
+// versions, proving a #counter()-driven page number keeps working (and
+// isn't itself misdiffed into something broken) once the header/footer
+// fix is in place.
+#set page(
+  header: [
+    Quarterly Report -- Final #h(1fr)
+    #datetime(year: 2026, month: 2, day: 1).display()
+  ],
+  footer: context [
+    Confidential #h(1fr) Page #counter(page).display() of #counter(page).final().first()
+  ],
+)
+
 = Quarter Report
 
 #summary(data)
@@ -65,3 +96,11 @@ _highly transparent_. Full details are available on
   [South], [8%],
   [East], [3%],
 )
+
+#pagebreak()
+
+// This page is identical in both versions -- it only exists so the
+// header, footer, and running page count set above keep rendering (and
+// keep matching each other) across more than one page.
+This second page is here only to show the header, footer, and page
+counter above continuing to render correctly across multiple pages.

@@ -8,7 +8,7 @@ use clap::Parser;
 use comemo::Track;
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::StyleChain;
-use typst::introspection::EmptyIntrospector;
+use typst::introspection::{EmptyIntrospector, Introspector, MAX_ITERS};
 use typst::utils::Protected;
 use typst::visualize::Color;
 use typst::World;
@@ -126,6 +126,15 @@ fn main() -> Result<()> {
     };
     let annotated = diff::diff_content(&content_old, &content_new, diff_options);
 
+    // `#set page(header: ..., footer: ...)` (and any other page-construction
+    // property) is deliberately left out of `annotated` above -- see
+    // `collect()`'s `StyledElem` case in diff.rs for why carrying it along
+    // per atom, like an ordinary style, would fragment the document into
+    // one page per changed word. It's diffed and reapplied here instead,
+    // once, on top of the whole document.
+    let page_styles = diff::diff_page_marginalia(&content_old, &content_new, diff_options);
+    let annotated = annotated.styled_with_map(page_styles);
+
     // Lays out this annotated content, reusing the "world" of the new
     // version (for fonts, the standard library, etc.)
     let document = layout(&world_new, &annotated)?;
@@ -172,9 +181,13 @@ fn resolve_root(
 /// This is a SIMPLIFIED version of the internal `compile_impl` of the
 /// `typst` crate (crates/typst/src/lib.rs): we only do a single evaluation
 /// pass, without the "introspection" stabilization loop (counters, table of
-/// contents...). This is enough for documents without complex cross
-/// references; otherwise, the full `compile_impl` loop would need to be
-/// ported.
+/// contents...) -- that loop is what `layout()`, below, ports instead,
+/// since that's where introspection-dependent content (a page counter, a
+/// TOC entry...) actually gets resolved. A single evaluation pass remains
+/// fine for the vast majority of documents, whose *evaluated content*
+/// doesn't itself depend on page counts or element positions -- just not
+/// a full port of `compile_impl`'s loop (which re-evaluates together with
+/// re-laying-out) for the rare document whose content does.
 fn eval_to_content(w: &SimpleWorld) -> Result<typst::foundations::Content> {
     let world = (w as &dyn World).track();
     let traced = Traced::default();
@@ -197,25 +210,56 @@ fn eval_to_content(w: &SimpleWorld) -> Result<typst::foundations::Content> {
 
 /// Lays out an already-resolved `Content`, producing a `PagedDocument`
 /// ready to be exported to PDF.
+///
+/// Mirrors the "introspection" stabilization loop in the `typst` crate's
+/// own `compile_impl` (crates/typst/src/lib.rs), which `eval_to_content`'s
+/// doc comment above flags as the piece this project's single-pass
+/// simplification leaves out: a first pass lays out the document with no
+/// knowledge yet of its own page count or content locations (an
+/// `EmptyIntrospector`) -- fine for most content, but not for anything
+/// that looks itself up during layout, like `#counter(page).final()` (how
+/// many pages does the finished document have?) or a table of contents.
+/// Each following pass re-lays out the SAME content, this time informed by
+/// the `Introspector` the previous pass produced (which already knows
+/// where everything ended up), until a pass's result no longer depends on
+/// anything that changed since the one before it -- `constraint.validate`
+/// is comemo's mechanism for detecting exactly that, the same one
+/// `compile_impl` checks -- or `MAX_ITERS` passes have been tried without
+/// converging, matching Typst's own give-up point.
 fn layout(w: &SimpleWorld, content: &typst::foundations::Content) -> Result<PagedDocument> {
     let world = (w as &dyn World).track();
     let traced = Traced::default();
-    let mut sink = Sink::new();
-    let route = Route::default();
-    let introspector = EmptyIntrospector;
-
-    let mut engine = Engine {
-        world,
-        library: w.library(),
-        introspector: Protected::new(introspector.track()),
-        traced: traced.track(),
-        sink: sink.track_mut(),
-        route,
-    };
-
     let library = w.library();
     let styles = StyleChain::new(&library.styles);
+    let empty_introspector = EmptyIntrospector;
 
-    typst_layout::layout_document(&mut engine, content, styles)
-        .map_err(|errs| anyhow::anyhow!("layout error: {errs:?}"))
+    let mut previous: Option<PagedDocument> = None;
+    for _ in 0..MAX_ITERS {
+        let introspector: &dyn Introspector = match &previous {
+            Some(doc) => doc.introspector().as_ref(),
+            None => &empty_introspector,
+        };
+        let constraint = comemo::Constraint::new();
+
+        let mut sink = Sink::new();
+        let mut engine = Engine {
+            world,
+            library,
+            introspector: Protected::new(introspector.track_with(&constraint)),
+            traced: traced.track(),
+            sink: sink.track_mut(),
+            route: Route::default(),
+        };
+
+        let document = typst_layout::layout_document(&mut engine, content, styles)
+            .map_err(|errs| anyhow::anyhow!("layout error: {errs:?}"))?;
+
+        let document_introspector: &dyn Introspector = document.introspector().as_ref();
+        if constraint.validate(document_introspector) {
+            return Ok(document);
+        }
+        previous = Some(document);
+    }
+
+    Ok(previous.expect("MAX_ITERS > 0, so at least one layout pass ran above"))
 }
