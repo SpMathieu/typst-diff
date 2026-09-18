@@ -10,6 +10,11 @@ The diff is computed on the `Content` resolved by Typst (after evaluating
 code, functions, variables), not on the raw source text — see `src/diff.rs`
 for the details.
 
+Two versions can come from two separate `.typ` files (`typst-diff files`,
+the default — see section 3 below), or from the same file at two
+different revisions — a tag, a branch, or a commit — of one local git
+repository (`typst-diff git`, see "Diffing across git revisions" below).
+
 ## ⚠️ Know this before you start
 
 This project relies on **internal** crates of the Typst compiler
@@ -74,7 +79,7 @@ cargo check
 # Build and run on the two example projects provided (see "Multi-file
 # projects" below for why --old-root/--new-root are needed here, and
 # "Fonts and packages" for --font-path/--package-path)
-cargo run --release -- examples/old/src/main.typ examples/new/src/main.typ \
+cargo run --release -- files examples/old/src/main.typ examples/new/src/main.typ \
   diff.pdf --old-root examples/old --new-root examples/new \
   --font-path examples/fonts --package-path examples/packages
 ```
@@ -93,20 +98,20 @@ Two flags let you control what the annotated PDF shows:
 
 ```bash
 # Hide deleted content entirely (no strikethrough text at all)
-cargo run --release -- examples/old/src/main.typ examples/new/src/main.typ \
+cargo run --release -- files examples/old/src/main.typ examples/new/src/main.typ \
   diff.pdf --old-root examples/old --new-root examples/new \
   --font-path examples/fonts --package-path examples/packages \
   --hide-deletions
 
 # Show added content in standard style (no underline/blue), as if it were
 # unchanged text
-cargo run --release -- examples/old/src/main.typ examples/new/src/main.typ \
+cargo run --release -- files examples/old/src/main.typ examples/new/src/main.typ \
   diff.pdf --old-root examples/old --new-root examples/new \
   --font-path examples/fonts --package-path examples/packages \
   --hide-additions
 
 # Combine both: a "clean" preview of the new document only
-cargo run --release -- examples/old/src/main.typ examples/new/src/main.typ \
+cargo run --release -- files examples/old/src/main.typ examples/new/src/main.typ \
   diff.pdf --old-root examples/old --new-root examples/new \
   --font-path examples/fonts --package-path examples/packages \
   --hide-deletions --hide-additions
@@ -121,7 +126,7 @@ colors (`red`, `orange`, `yellow`, `olive`, `green`, `lime`, `aqua`,
 `gray`, `silver`, `white`) or a hex color (`#f30`, `7a03c2`, `abcdefff`):
 
 ```bash
-cargo run --release -- examples/old/src/main.typ examples/new/src/main.typ \
+cargo run --release -- files examples/old/src/main.typ examples/new/src/main.typ \
   diff.pdf --old-root examples/old --new-root examples/new \
   --font-path examples/fonts --package-path examples/packages \
   --deletion-color orange --addition-color "#00b894"
@@ -230,6 +235,54 @@ or `examples/new/src/main.typ` fails outright on the unresolved
 `#block[...]`, so nothing *else* in the document is affected — but the
 imports still have to resolve for evaluation to succeed at all).
 
+### Diffing across git revisions
+
+Everything above uses `typst-diff files`, which reads the old and new
+version from two separate `.typ` files (optionally full separate project
+directories, as `examples/old`/`examples/new` are). `typst-diff git`
+diffs the *same* file instead, as it reads at two different revisions —
+a tag, a branch, or a raw commit, resolved the same way `git rev-parse`
+resolves one — of one local git repository, without ever checking either
+revision out (no `git checkout`, no second working copy):
+
+```bash
+cargo run --release -- git examples/git-project report.typ diff.pdf \
+  --old-rev v1.0 --new-rev v2.0
+
+# A branch or a raw commit work exactly the same way as a tag
+cargo run --release -- git examples/git-project report.typ diff.pdf \
+  --old-rev v2.0 --new-rev develop
+```
+
+`examples/git-project` is its own separate git repository (added here as
+a **submodule**, so `git clone`/`git status` won't show its files as part
+of this one) with a small `report.typ` committed a few times: tagged
+`v1.0` and `v2.0`, with a further work-in-progress `develop` branch on
+top of `v2.0`, to exercise all three kinds of revision. If it's empty
+after cloning this repository, fetch it once with:
+```bash
+git submodule update --init examples/git-project
+```
+
+`--old-root`/`--new-root` work the same way as in `files` mode (see
+"Multi-file projects" above), except relative to the *repository's* own
+root instead of a real filesystem directory — there's no checkout to
+point at, so a path like `/lib/helpers.typ` is instead looked up directly
+in the resolved revision's git tree, at
+`<repository>/<old-root-or-new-root>/lib/helpers.typ`. They default to
+`FILE`'s own parent directory, exactly like `files` mode's do.
+`--font-path`, `--package-path`, and every other flag (`--hide-deletions`,
+`--deletion-color`...) work identically in both modes — fonts and
+packages are always read from the real filesystem, never from the
+repository, in either mode.
+
+Internally, `git` mode reads blobs directly out of git's object database
+via the pure-Rust [`gix`](https://docs.rs/gix) crate (see `Backend::Git`
+in `world.rs`) — no shelling out to `git`, no libgit2/OpenSSL, and,
+crucially, nothing ever written to disk or to the repository's working
+tree, so it's safe to run against a repository you have other work in
+progress in.
+
 ## 4. Project structure
 
 ```
@@ -247,10 +300,14 @@ typst-diff/
 │   │       ├── confidential.typ    # included via a relative path
 │   │       ├── items.typ           # included via a relative path
 │   │       └── items_by_table.typ  # included via a relative path
-│   └── new/             # example: new version of the same project
-│       └── ...           # same layout, updated content throughout
+│   ├── new/             # example: new version of the same project
+│   │   └── ...           # same layout, updated content throughout
+│   ├── fonts/            # --font-path example dir (empty except a README)
+│   ├── packages/         # --package-path example dir (preview + local)
+│   └── git-project/      # `typst-diff git` example (its own repo -- a
+│       └── ...            # submodule; see its own note below)
 └── src/
-    ├── main.rs          # entry point: CLI, orchestration
+    ├── main.rs          # entry point: CLI (files/git subcommands), orchestration
     ├── world.rs         # minimal implementation of `typst::World`
     └── diff.rs           # Content flattening + diff + reconstruction
 ```
@@ -456,6 +513,29 @@ typst-diff/
   doesn't depend on page counts or element positions, but not a full
   port of `compile_impl`'s loop (which re-evaluates together with
   re-laying-out) for the rare document that needs it.
+- **`git` mode reopens the repository on every file it reads, and can't
+  see uncommitted changes**: `Backend::Git` (in `world.rs`) deliberately
+  never keeps a live `gix::Repository`/`gix::ThreadSafeRepository` around
+  as a field — as of `gix` 0.87, neither is actually `Send`/`Sync`
+  regardless of which crate features are enabled (both carry a lazily
+  resolved remote-URL-rewrite cache, deep inside their config, that isn't
+  either), which `SimpleWorld` as a whole must be. So only the repository
+  *path* and the already-resolved revision's tree *hash* are kept (both
+  plain, `Send`/`Sync` values on their own), and the repository is
+  reopened — config parsed again, etc. — for every single file read. Fine
+  for a document with a handful of files (the common case), needlessly
+  slow for a project with hundreds of them; if that turns out to matter,
+  the fix is to eagerly walk the whole resolved tree once (`Tree::traverse`
+  in `gix`) into an in-memory `HashMap<PathBuf, Vec<u8>>` at construction
+  time instead of reading on demand, sidestepping the `Send`/`Sync` issue
+  entirely by not keeping any `gix` type around at all afterward.
+  Separately, since revisions are resolved from git's object database, not
+  a checkout, there's no way to diff against a working tree's uncommitted
+  changes — both `--old-rev` and `--new-rev` have to be something already
+  committed (`git rev-parse` accepts more exotic things too, like
+  `@{upstream}` or a merge-base expression, which work here as well, but
+  not the working tree itself). And `FILE` is assumed to be the same path
+  in both revisions — there's no support for diffing across a rename.
 
 ## If `cargo build` fails
 

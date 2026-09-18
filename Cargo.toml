@@ -32,6 +32,12 @@ anyhow = "1"
 # --font-path. Package loading (see world.rs's `realize`) only needs
 # `packages::FsPackages`, which isn't behind a feature flag.
 typst-kit = { version = "0.15", features = ["embedded-fonts", "scan-fonts"] }
+# Reads git objects directly (no checkout) for `typst-diff git`'s
+# --old-rev/--new-rev -- see world.rs's `Backend::Git`. "revision" backs
+# `Repository::rev_parse_single`, which resolves a tag, branch, or commit
+# the same way `git rev-parse` does. Pure Rust (no libgit2/openssl), unlike
+# `git2`, keeping this dependency-light and friendly to static musl builds.
+gix = { version = "0.87", default-features = false, features = ["revision", "sha1"] }
 
 [profile.release]
 opt-level = 3

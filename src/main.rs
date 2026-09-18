@@ -1,10 +1,11 @@
 mod diff;
 mod world;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use comemo::Track;
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::StyleChain;
@@ -12,6 +13,7 @@ use typst::introspection::{EmptyIntrospector, Introspector, MAX_ITERS};
 use typst::utils::Protected;
 use typst::visualize::Color;
 use typst::World;
+use typst_kit::fonts::FontStore;
 use typst_layout::PagedDocument;
 
 use crate::diff::DiffOptions;
@@ -20,7 +22,24 @@ use crate::world::SimpleWorld;
 /// Compares two versions of a Typst document and produces an annotated PDF
 /// (additions in underlined blue, deletions in struck-through red).
 #[derive(Parser)]
-struct Args {
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Diff two separate `.typ` files (optionally full separate project
+    /// directories) -- the default way to use typst-diff
+    Files(FilesArgs),
+    /// Diff the same `.typ` file across two revisions (tags, branches, or
+    /// commits) of one local git repository, without checking either one
+    /// out
+    Git(GitArgs),
+}
+
+#[derive(clap::Args)]
+struct FilesArgs {
     /// Old version of the `.typ` file
     old: PathBuf,
     /// New version of the `.typ` file
@@ -28,14 +47,6 @@ struct Args {
     /// Output PDF file
     #[arg(default_value = "diff.pdf")]
     output: PathBuf,
-    /// Don't show deleted content at all (by default, it's struck through
-    /// in red)
-    #[arg(long)]
-    hide_deletions: bool,
-    /// Don't highlight added content (by default, it's underlined in blue);
-    /// when set, new content is rendered in standard style
-    #[arg(long)]
-    hide_additions: bool,
     /// Project root for the old file, used to resolve its absolute paths
     /// (`/lib/helpers.typ`, `json("/data.json")`...). Defaults to the old
     /// file's parent directory -- pass this explicitly when it lives in a
@@ -45,6 +56,54 @@ struct Args {
     /// Project root for the new file (see `--old-root`)
     #[arg(long)]
     new_root: Option<PathBuf>,
+    #[command(flatten)]
+    common: CommonArgs,
+}
+
+#[derive(clap::Args)]
+struct GitArgs {
+    /// Path to the local git repository (its working directory, or a bare
+    /// repository)
+    repo: PathBuf,
+    /// Path to the `.typ` entry point, relative to the repository root --
+    /// the same path is read at both revisions
+    file: PathBuf,
+    /// Output PDF file
+    #[arg(default_value = "diff.pdf")]
+    output: PathBuf,
+    /// Old revision: a tag, branch, or commit -- anything `git rev-parse`
+    /// would also accept (`v1.0`, `main`, `a1b2c3d`, `HEAD~3`...)
+    #[arg(long)]
+    old_rev: String,
+    /// New revision (see `--old-rev`)
+    #[arg(long)]
+    new_rev: String,
+    /// Project root for the old revision, used to resolve `FILE`'s
+    /// absolute paths (`/lib/helpers.typ`, `json("/data.json")`...) --
+    /// like `files` mode's `--old-root`, but a path relative to the
+    /// *repository's* root (nothing is checked out, so there's no real
+    /// filesystem directory to point at). Defaults to `FILE`'s own parent
+    /// directory; pass `.` for the repository's own root itself
+    #[arg(long)]
+    old_root: Option<PathBuf>,
+    /// Project root for the new revision (see `--old-root`)
+    #[arg(long)]
+    new_root: Option<PathBuf>,
+    #[command(flatten)]
+    common: CommonArgs,
+}
+
+/// Flags shared identically by both `files` and `git` mode.
+#[derive(clap::Args)]
+struct CommonArgs {
+    /// Don't show deleted content at all (by default, it's struck through
+    /// in red)
+    #[arg(long)]
+    hide_deletions: bool,
+    /// Don't highlight added content (by default, it's underlined in blue);
+    /// when set, new content is rendered in standard style
+    #[arg(long)]
+    hide_additions: bool,
     /// Color deleted content is struck through in. Either one of Typst's
     /// named colors (red, orange, yellow, olive, green, lime, aqua, teal,
     /// eastern, navy, blue, purple, fuchsia, maroon, black, gray, silver,
@@ -114,8 +173,13 @@ fn parse_color(s: &str) -> Result<Color, String> {
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    match Cli::parse().command {
+        Command::Files(args) => run_files(args),
+        Command::Git(args) => run_git(args),
+    }
+}
 
+fn run_files(args: FilesArgs) -> Result<()> {
     // Canonicalized (absolute, symlink-resolved) so that, whatever form
     // the user spelled `old`/`new`/`--old-root`/`--new-root` in, the main
     // file path always lexically prefixes its project root the same way
@@ -124,41 +188,86 @@ fn main() -> Result<()> {
     let new_main = canonicalize(&args.new)?;
     let old_root = resolve_root(&old_main, args.old_root.as_deref())?;
     let new_root = resolve_root(&new_main, args.new_root.as_deref())?;
-    let package_path = args
-        .package_path
-        .as_deref()
+    let package_path = resolve_package_path(args.common.package_path.as_deref())?;
+    let fonts = build_fonts(&args.common.font_paths);
+
+    // One Typst "world" per version: each has its own in-memory source,
+    // rooted at its own project root.
+    let world_old = SimpleWorld::from_directory(&old_main, &old_root, fonts.clone(), package_path.clone())?;
+    let world_new = SimpleWorld::from_directory(&new_main, &new_root, fonts, package_path)?;
+
+    diff_and_write(&world_old, &world_new, &args.common, &args.output)
+}
+
+fn run_git(args: GitArgs) -> Result<()> {
+    let repo_path = canonicalize(&args.repo)?;
+    let package_path = resolve_package_path(args.common.package_path.as_deref())?;
+    let fonts = build_fonts(&args.common.font_paths);
+
+    // One Typst "world" per revision: each reads the same `FILE` (and
+    // whatever it `#include`s/`#import`s) straight out of git's object
+    // database at its own revision, without checking either one out.
+    let world_old = SimpleWorld::from_git(
+        &repo_path,
+        &args.old_rev,
+        &args.file,
+        args.old_root.as_deref(),
+        fonts.clone(),
+        package_path.clone(),
+    )?;
+    let world_new = SimpleWorld::from_git(
+        &repo_path,
+        &args.new_rev,
+        &args.file,
+        args.new_root.as_deref(),
+        fonts,
+        package_path,
+    )?;
+
+    diff_and_write(&world_old, &world_new, &args.common, &args.output)
+}
+
+/// Fonts are a project-wide setting (not specific to either version of the
+/// document being diffed), and scanning `--font-path` directories is real
+/// work -- gathered once here and shared (via `Arc::clone`) between the
+/// "old" and "new" world instead of redoing it twice.
+fn build_fonts(font_paths: &[PathBuf]) -> Arc<FontStore> {
+    let mut font_store = FontStore::new();
+    font_store.extend(typst_kit::fonts::embedded());
+    for font_path in font_paths {
+        font_store.extend(typst_kit::fonts::scan(font_path));
+    }
+    Arc::new(font_store)
+}
+
+/// Canonicalizes `--package-path`, if given.
+fn resolve_package_path(package_path: Option<&Path>) -> Result<Option<PathBuf>> {
+    package_path
         .map(|path| {
             path.canonicalize()
                 .with_context(|| format!("resolving package path {path:?}"))
         })
-        .transpose()?;
+        .transpose()
+}
 
-    // Fonts are a project-wide setting (not specific to either version of
-    // the document being diffed), and scanning `--font-path` directories
-    // is real work -- gathered once here and shared (via `Arc::clone`,
-    // below) between the "old" and "new" world instead of redoing it
-    // twice.
-    let mut font_store = typst_kit::fonts::FontStore::new();
-    font_store.extend(typst_kit::fonts::embedded());
-    for font_path in &args.font_paths {
-        font_store.extend(typst_kit::fonts::scan(font_path));
-    }
-    let fonts = std::sync::Arc::new(font_store);
-
-    // One Typst "world" per version: each has its own in-memory source,
-    // rooted at its own project root.
-    let world_old = SimpleWorld::new(&old_main, &old_root, fonts.clone(), package_path.clone())?;
-    let world_new = SimpleWorld::new(&new_main, &new_root, fonts.clone(), package_path)?;
-
-    let content_old = eval_to_content(&world_old)?;
-    let content_new = eval_to_content(&world_new)?;
+/// Diffs the two worlds and writes the resulting annotated PDF to `output`
+/// -- the shared tail end of both `run_files` and `run_git`, once each has
+/// built its own pair of `SimpleWorld`s.
+fn diff_and_write(
+    world_old: &SimpleWorld,
+    world_new: &SimpleWorld,
+    common: &CommonArgs,
+    output: &Path,
+) -> Result<()> {
+    let content_old = eval_to_content(world_old)?;
+    let content_new = eval_to_content(world_new)?;
 
     // Computes the annotated Content (a "track changes"-style diff).
     let diff_options = DiffOptions {
-        show_deletions: !args.hide_deletions,
-        show_additions: !args.hide_additions,
-        deletion_color: args.deletion_color.to_vec4_u8(),
-        addition_color: args.addition_color.to_vec4_u8(),
+        show_deletions: !common.hide_deletions,
+        show_additions: !common.hide_additions,
+        deletion_color: common.deletion_color.to_vec4_u8(),
+        addition_color: common.addition_color.to_vec4_u8(),
     };
     let annotated = diff::diff_content(&content_old, &content_new, diff_options);
 
@@ -173,22 +282,21 @@ fn main() -> Result<()> {
 
     // Lays out this annotated content, reusing the "world" of the new
     // version (for fonts, the standard library, etc.)
-    let document = layout(&world_new, &annotated)?;
+    let document = layout(world_new, &annotated)?;
 
     let pdf_options = typst_pdf::PdfOptions::default();
     let pdf_bytes = typst_pdf::pdf(&document, &pdf_options)
         .map_err(|errs| anyhow::anyhow!("PDF export error: {errs:?}"))?;
 
-    std::fs::write(&args.output, pdf_bytes)
-        .with_context(|| format!("writing {:?}", args.output))?;
+    std::fs::write(output, pdf_bytes).with_context(|| format!("writing {output:?}"))?;
 
-    println!("Diff PDF written to {:?}", args.output);
+    println!("Diff PDF written to {output:?}");
     Ok(())
 }
 
 /// Canonicalizes a path (resolves it to an absolute path with symlinks and
 /// `.`/`..` components resolved away), with a friendly error on failure.
-fn canonicalize(path: &std::path::Path) -> Result<PathBuf> {
+fn canonicalize(path: &Path) -> Result<PathBuf> {
     path.canonicalize()
         .with_context(|| format!("reading {path:?}"))
 }
@@ -196,10 +304,7 @@ fn canonicalize(path: &std::path::Path) -> Result<PathBuf> {
 /// Resolves the real project root for an already-canonicalized `.typ` file
 /// path: either the explicit `--old-root`/`--new-root` the user passed
 /// (canonicalized too), or, by default, the file's own parent directory.
-fn resolve_root(
-    main_path: &std::path::Path,
-    explicit_root: Option<&std::path::Path>,
-) -> Result<PathBuf> {
+fn resolve_root(main_path: &Path, explicit_root: Option<&Path>) -> Result<PathBuf> {
     match explicit_root {
         Some(root) => root
             .canonicalize()
