@@ -7,9 +7,9 @@ license = "Apache-2.0"
 # IMPORTANT NOTE ON VERSIONS
 # --------------------------
 # Typst's internal crates (typst, typst-library, typst-eval, typst-syntax,
-# typst-layout, typst-pdf, typst-assets) MUST all be on the SAME version,
-# since they are not guaranteed to be compatible across different versions
-# (they are "implementation" crates, not a stable public API).
+# typst-layout, typst-pdf, typst-kit) MUST all be on the SAME version, since
+# they are not guaranteed to be compatible across different versions (they
+# are "implementation" crates, not a stable public API).
 #
 # Check the latest published version here before building:
 #   https://crates.io/crates/typst
@@ -21,13 +21,17 @@ typst-eval = "0.15"
 typst-layout = "0.15"
 typst-syntax = "0.15"
 typst-pdf = "0.15"
-typst-assets = { version = "0.15", features = ["fonts"] }
 
 comemo = "0.5"
 ecow = "0.2"
 similar = "2"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+# "embedded-fonts"/"scan-fonts" back FontStore's two font sources (see
+# world.rs): the ones bundled with the compiler, and ones discovered under
+# --font-path. Package loading (see world.rs's `realize`) only needs
+# `packages::FsPackages`, which isn't behind a feature flag.
+typst-kit = { version = "0.15", features = ["embedded-fonts", "scan-fonts"] }
 
 [profile.release]
 opt-level = 3

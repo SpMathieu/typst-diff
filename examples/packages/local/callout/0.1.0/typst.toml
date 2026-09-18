@@ -1,0 +1,8 @@
+[package]
+name = "callout"
+version = "0.1.0"
+entrypoint = "lib.typ"
+authors = ["typst-diff examples"]
+license = "Apache-2.0"
+description = "A tiny hand-authored package, never published anywhere, used to demonstrate resolving @local/... imports via --package-path."
+compiler = "0.15.0"

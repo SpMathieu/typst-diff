@@ -1,0 +1,5 @@
+# Third-party fonts (e.g. Tahoma, copied in per this directory's README)
+# aren't `typst-diff`'s to redistribute -- never committed here.
+*
+!.gitignore
+!README.md

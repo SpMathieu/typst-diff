@@ -72,9 +72,11 @@ From the `typst-diff/` folder:
 cargo check
 
 # Build and run on the two example projects provided (see "Multi-file
-# projects" below for why --old-root/--new-root are needed here)
+# projects" below for why --old-root/--new-root are needed here, and
+# "Fonts and packages" for --font-path/--package-path)
 cargo run --release -- examples/old/src/main.typ examples/new/src/main.typ \
-  diff.pdf --old-root examples/old --new-root examples/new
+  diff.pdf --old-root examples/old --new-root examples/new \
+  --font-path examples/fonts --package-path examples/packages
 ```
 
 The `diff.pdf` file is created in the current folder. Open it to see the
@@ -92,16 +94,21 @@ Two flags let you control what the annotated PDF shows:
 ```bash
 # Hide deleted content entirely (no strikethrough text at all)
 cargo run --release -- examples/old/src/main.typ examples/new/src/main.typ \
-  diff.pdf --old-root examples/old --new-root examples/new --hide-deletions
+  diff.pdf --old-root examples/old --new-root examples/new \
+  --font-path examples/fonts --package-path examples/packages \
+  --hide-deletions
 
 # Show added content in standard style (no underline/blue), as if it were
 # unchanged text
 cargo run --release -- examples/old/src/main.typ examples/new/src/main.typ \
-  diff.pdf --old-root examples/old --new-root examples/new --hide-additions
+  diff.pdf --old-root examples/old --new-root examples/new \
+  --font-path examples/fonts --package-path examples/packages \
+  --hide-additions
 
 # Combine both: a "clean" preview of the new document only
 cargo run --release -- examples/old/src/main.typ examples/new/src/main.typ \
   diff.pdf --old-root examples/old --new-root examples/new \
+  --font-path examples/fonts --package-path examples/packages \
   --hide-deletions --hide-additions
 ```
 
@@ -116,6 +123,7 @@ colors (`red`, `orange`, `yellow`, `olive`, `green`, `lime`, `aqua`,
 ```bash
 cargo run --release -- examples/old/src/main.typ examples/new/src/main.typ \
   diff.pdf --old-root examples/old --new-root examples/new \
+  --font-path examples/fonts --package-path examples/packages \
   --deletion-color orange --addition-color "#00b894"
 ```
 
@@ -173,6 +181,55 @@ you can just omit `--old-root`/`--new-root` — they default to the
 respective input file's own directory, exactly like `typst compile`
 without `--root` does.
 
+### Fonts and packages
+
+Besides the fonts embedded in the compiler (Libertinus Serif, New
+Computer Modern...), `--font-path` adds a directory to recursively
+search for more, the same way `typst compile --font-path` does. Pass it
+multiple times to search multiple directories; it applies to both
+versions of the document, since fonts aren't something that differs
+between them.
+
+`--package-path` resolves `#import "@preview/...": ...` and
+`#import "@local/...": ...`-style package imports from a local
+directory, structured the same way Typst's own package cache is:
+`<package-path>/<namespace>/<name>/<version>/...` (so, for instance,
+`@preview/cuti:0.4.0` resolves to `<package-path>/preview/cuti/0.4.0`,
+and `@local/callout:0.1.0` to `<package-path>/local/callout/0.1.0`).
+**No package is ever downloaded from the network** — this only reads
+what's already on disk, whichever namespace it's under (`preview`,
+`local`, or any other name — `world.rs` doesn't treat any namespace
+specially). To populate that directory:
+- for a `preview` package, either copy it over from wherever `typst
+  compile` itself already cached it (`~/.cache/typst/packages` on
+  Linux, `~/Library/Caches/typst/packages` on macOS,
+  `%LOCALAPPDATA%\typst\packages` on Windows — see
+  `--package-cache-path` in `typst compile --help`), or download and
+  unpack its `.tar.gz` from
+  `https://packages.typst.org/preview/<name>-<version>.tar.gz` by hand;
+- for a `local` package — one you wrote yourself and never published
+  anywhere — just place its files directly at
+  `<package-path>/local/<name>/<version>/`, the same way real `typst`'s
+  own package data directory works for unpublished packages.
+
+Both example projects (`examples/old/`, `examples/new/`) use this in
+their "Status" section, near the end of `src/main.typ`: a font found
+only by scanning `examples/fonts` (Tahoma — see
+`examples/fonts/README.md` for why the actual font file isn't checked
+into this repository), a package from the `preview` namespace
+(`@preview/cuti`, mirrored from
+[Typst Universe](https://typst.app/universe/package/cuti/) under its own
+MIT license), and a package from the `local` namespace (`@local/callout`,
+a trivial one-function package written just for this example, under this
+project's own Apache-2.0 license, to demonstrate the `local` namespace
+specifically) — see `examples/packages/`. That's why every command in
+this README passes `--font-path examples/fonts --package-path
+examples/packages`: without them, evaluating `examples/old/src/main.typ`
+or `examples/new/src/main.typ` fails outright on the unresolved
+`@preview/cuti`/`@local/callout` imports (both are scoped to that one
+`#block[...]`, so nothing *else* in the document is affected — but the
+imports still have to resolve for evaluation to succeed at all).
+
 ## 4. Project structure
 
 ```
@@ -200,18 +257,27 @@ typst-diff/
 
 ## 5. Known limitations (possible improvements)
 
-- **Local multi-file projects work, packages don't**: `SimpleWorld` (in
-  `world.rs`) reads any file the project references — `#include
-  "other.typ"`, `#import "/lib/helpers.typ": foo`, `json("/data.json")`,
-  `image("logo.png")`... — from the real filesystem, both absolute
-  (`/...`) and relative (`./...`) paths, resolved exactly like real
-  `typst` does (see "Multi-file projects" above for the resolution rules
-  and the `--old-root`/`--new-root` flags). It does **not** support
-  packages (`#import "@preview/...": ..."`), since that needs a package
-  downloader/cache with network access — see `PackageStorage` in
-  `typst-kit` if you need to add that. For a fully-featured `World`
-  (packages included), look at `typst-cli`'s `SystemWorld` instead (see
-  the Typst GitHub repo, `crates/typst-cli/src/world.rs`).
+- **Local multi-file projects and local packages work, network package
+  downloads don't**: `SimpleWorld` (in `world.rs`) reads any file the
+  project references — `#include "other.typ"`, `#import
+  "/lib/helpers.typ": foo`, `json("/data.json")`, `image("logo.png")`...
+  — from the real filesystem, both absolute (`/...`) and relative
+  (`./...`) paths, resolved exactly like real `typst` does (see
+  "Multi-file projects" above for the resolution rules and the
+  `--old-root`/`--new-root` flags). Packages (`#import
+  "@preview/...": ..."`, `#import "@local/...": ..."`, any namespace)
+  resolve too, but only from a local directory passed via
+  `--package-path` (see "Fonts and packages" above) — this project has
+  no package downloader, so a package has to already be on disk there.
+  For on-demand downloads from Typst Universe (what real
+  `typst compile` does when a package isn't found locally), see
+  `UniversePackages`/`SystemPackages::new` in `typst-kit` (the
+  `system-downloader` feature) if you need to add that — it wasn't
+  pulled in here to keep this project's dependency tree (and any
+  network-related build/deployment concerns, e.g. cross-compiling to
+  musl) minimal. For a fully-featured `World` (downloads included), look
+  at `typst-cli`'s `SystemWorld` instead (see the Typst GitHub repo,
+  `crates/typst-cli/src/world.rs`).
 - **Style follows the new document, but pure style changes aren't
   flagged**: `collect()` (in `src/diff.rs`) carries each atom's styles
   (color, weight, italics...) along as it flattens a `StyledElem`, and

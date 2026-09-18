@@ -55,6 +55,22 @@ struct Args {
     /// `--deletion-color`
     #[arg(long, default_value = "blue", value_parser = parse_color)]
     addition_color: Color,
+    /// Additional directory to search recursively for fonts, on top of the
+    /// ones embedded in the compiler. Can be passed multiple times; shared
+    /// by both versions of the document
+    #[arg(long = "font-path", value_name = "DIR")]
+    font_paths: Vec<PathBuf>,
+    /// Local directory packages (`@preview/cuti:0.4.0`,
+    /// `@local/callout:0.1.0`, any namespace...) are resolved from,
+    /// structured the way Typst's own package cache is
+    /// (`<package-path>/<namespace>/<name>/<version>/...`, e.g.
+    /// `@preview/cuti:0.4.0` resolves to
+    /// `<package-path>/preview/cuti/0.4.0`). No package is ever downloaded
+    /// from the network -- only one already present on disk under this
+    /// directory (e.g. one `typst-cli` itself already cached, copied over,
+    /// or one placed here by hand) can be resolved
+    #[arg(long, value_name = "DIR")]
+    package_path: Option<PathBuf>,
 }
 
 /// Parses a color the way `--deletion-color`/`--addition-color` accept it:
@@ -108,11 +124,31 @@ fn main() -> Result<()> {
     let new_main = canonicalize(&args.new)?;
     let old_root = resolve_root(&old_main, args.old_root.as_deref())?;
     let new_root = resolve_root(&new_main, args.new_root.as_deref())?;
+    let package_path = args
+        .package_path
+        .as_deref()
+        .map(|path| {
+            path.canonicalize()
+                .with_context(|| format!("resolving package path {path:?}"))
+        })
+        .transpose()?;
+
+    // Fonts are a project-wide setting (not specific to either version of
+    // the document being diffed), and scanning `--font-path` directories
+    // is real work -- gathered once here and shared (via `Arc::clone`,
+    // below) between the "old" and "new" world instead of redoing it
+    // twice.
+    let mut font_store = typst_kit::fonts::FontStore::new();
+    font_store.extend(typst_kit::fonts::embedded());
+    for font_path in &args.font_paths {
+        font_store.extend(typst_kit::fonts::scan(font_path));
+    }
+    let fonts = std::sync::Arc::new(font_store);
 
     // One Typst "world" per version: each has its own in-memory source,
     // rooted at its own project root.
-    let world_old = SimpleWorld::new(&old_main, &old_root)?;
-    let world_new = SimpleWorld::new(&new_main, &new_root)?;
+    let world_old = SimpleWorld::new(&old_main, &old_root, fonts.clone(), package_path.clone())?;
+    let world_new = SimpleWorld::new(&new_main, &new_root, fonts.clone(), package_path)?;
 
     let content_old = eval_to_content(&world_old)?;
     let content_new = eval_to_content(&world_new)?;

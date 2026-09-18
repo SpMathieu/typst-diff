@@ -16,6 +16,10 @@
 // and "examples/new" respectively -- otherwise the absolute imports below
 // would (wrongly) be resolved against "src/" instead. See the README's
 // "Multi-file projects" section.
+//
+// This file also needs `--font-path examples/fonts --package-path
+// examples/packages` to compile at all (see the "Status" section near
+// the end, and the README's "Fonts and packages" section).
 
 // Absolute import: "/lib/report.typ" is resolved against the project
 // root, not against this file's own directory (src/).
@@ -91,6 +95,36 @@ _fully transparent_. Full details are available on
 // and the whole table is inserted, with nothing in between).
 Regional highlights: North grew by 5%, South grew by 8%, and East grew
 by 3%.
+
+// Demonstrates --font-path and --package-path (see the README's "Fonts
+// and packages" section): a font found only by scanning a --font-path
+// directory (Tahoma isn't embedded in the compiler -- see
+// examples/fonts/README.md for why it isn't checked into this repo
+// either), a package from the `preview` namespace (@preview/cuti,
+// mirrored from Typst Universe -- see
+// examples/packages/preview/cuti/0.4.0), and a package from the `local`
+// namespace (@local/callout, hand-authored just for this example and
+// never published anywhere -- see
+// examples/packages/local/callout/0.1.0). Neither namespace is
+// special-cased in world.rs: both resolve from the same --package-path
+// directory, just under a different subdirectory name. Scoped to this
+// one block so switching to Tahoma doesn't leak into the rest of the
+// document.
+#block[
+  #import "@preview/cuti:0.4.0": show-cn-fakebold
+  #import "@local/callout:0.1.0": callout
+  #set text(font: "Tahoma")
+  #show: show-cn-fakebold
+
+  == Status
+
+  #callout(title: "Status")[Draft -- not yet reviewed.]
+
+  This paragraph is set in Tahoma (via --font-path) -- *bold* runs like
+  this one go through cuti's `show-cn-fakebold` (via --package-path,
+  `preview` namespace) without any visible difference for Latin text,
+  which only kicks in for CJK text lacking a bold weight of its own.
+]
 
 #pagebreak()
 
