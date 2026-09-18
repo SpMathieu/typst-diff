@@ -38,6 +38,42 @@ typst-kit = { version = "0.15", features = ["embedded-fonts", "scan-fonts"] }
 # the same way `git rev-parse` does. Pure Rust (no libgit2/openssl), unlike
 # `git2`, keeping this dependency-light and friendly to static musl builds.
 gix = { version = "0.87", default-features = false, features = ["revision", "sha1"] }
+# Backs `--gui` (see gui.rs): eframe/egui for the window and widgets, rfd
+# for native file/folder picker dialogs, open to launch the generated PDF
+# in its default viewer.
+#
+# eframe's and rfd's defaults were both changed on purpose, after
+# debugging real failures on a WSLg desktop (Ubuntu on WSL2, distinct
+# from a sandboxed dev container also used along the way, which never
+# got a GUI backend working at all -- see the README's "Known
+# limitations"):
+# - `wgpu` (eframe's default renderer) failed outright ("Failed to
+#   create surface for any enabled backend") -- `glow` (OpenGL, via
+#   glutin) works instead. `default-features = false` drops `wgpu` (and
+#   its `wgpu_no_default_features`/`web_screen_reader` companions)
+#   entirely, rather than compiling in a renderer that's never used.
+# - `glow` alone then failed too ("Found no glutin configs matching the
+#   template") until the `libegl1` system package (not installed by
+#   default on this Ubuntu-on-WSL image) was installed -- a prerequisite
+#   this project can document but not fix from inside Cargo.toml.
+# - `accesskit` (screen-reader accessibility, on by `eframe`'s default
+#   features) made the window connect to D-Bus/AT-SPI for it, which
+#   crashed outright ("Io error: Connection reset by peer", "winit
+#   EventLoopError") under WSLg specifically -- dropped for now. `links`
+#   (clickable-hyperlink support) isn't used by this form either, so
+#   it's left out too.
+# - rfd's default "xdg-portal" backend talks to the `xdg-desktop-portal`
+#   D-Bus service for its dialogs -- which isn't installed or running
+#   under WSLg at all (no desktop session, `XDG_CURRENT_DESKTOP` unset),
+#   so every "Browse..." button silently did nothing (the underlying
+#   D-Bus call just fails to find the service). Switched to rfd's "gtk3"
+#   feature instead: GTK's own file chooser dialog doesn't depend on any
+#   portal daemon being reachable, only on `libgtk-3-dev`
+#   (`apt install libgtk-3-dev pkg-config` to build, `libgtk-3-0` to
+#   run -- most desktops already have the latter).
+eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+open = "5.4.4"
+rfd = { version = "0.17.2", default-features = false, features = ["gtk3"] }
 
 [profile.release]
 opt-level = 3

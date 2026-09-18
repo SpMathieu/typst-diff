@@ -1,4 +1,5 @@
 mod diff;
+mod gui;
 mod world;
 
 use std::path::{Path, PathBuf};
@@ -24,7 +25,11 @@ use crate::world::SimpleWorld;
 #[derive(Parser)]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+    /// Launch a graphical interface to configure and run a diff, instead
+    /// of using CLI arguments. Ignores any subcommand given alongside it
+    #[arg(long)]
+    gui: bool,
 }
 
 #[derive(Subcommand)]
@@ -38,46 +43,50 @@ enum Command {
     Git(GitArgs),
 }
 
+/// Every field is `pub(crate)`, not just as-needed by `main.rs` itself, so
+/// `gui.rs` can build one of these directly from widget state and hand it
+/// to `run_files`/`run_git` -- the exact same entry points the CLI itself
+/// uses, so the two can't drift apart.
 #[derive(clap::Args)]
-struct FilesArgs {
+pub(crate) struct FilesArgs {
     /// Old version of the `.typ` file
-    old: PathBuf,
+    pub(crate) old: PathBuf,
     /// New version of the `.typ` file
-    new: PathBuf,
+    pub(crate) new: PathBuf,
     /// Output PDF file
     #[arg(default_value = "diff.pdf")]
-    output: PathBuf,
+    pub(crate) output: PathBuf,
     /// Project root for the old file, used to resolve its absolute paths
     /// (`/lib/helpers.typ`, `json("/data.json")`...). Defaults to the old
     /// file's parent directory -- pass this explicitly when it lives in a
     /// subdirectory of the actual project root
     #[arg(long)]
-    old_root: Option<PathBuf>,
+    pub(crate) old_root: Option<PathBuf>,
     /// Project root for the new file (see `--old-root`)
     #[arg(long)]
-    new_root: Option<PathBuf>,
+    pub(crate) new_root: Option<PathBuf>,
     #[command(flatten)]
-    common: CommonArgs,
+    pub(crate) common: CommonArgs,
 }
 
 #[derive(clap::Args)]
-struct GitArgs {
+pub(crate) struct GitArgs {
     /// Path to the local git repository (its working directory, or a bare
     /// repository)
-    repo: PathBuf,
+    pub(crate) repo: PathBuf,
     /// Path to the `.typ` entry point, relative to the repository root --
     /// the same path is read at both revisions
-    file: PathBuf,
+    pub(crate) file: PathBuf,
     /// Output PDF file
     #[arg(default_value = "diff.pdf")]
-    output: PathBuf,
+    pub(crate) output: PathBuf,
     /// Old revision: a tag, branch, or commit -- anything `git rev-parse`
     /// would also accept (`v1.0`, `main`, `a1b2c3d`, `HEAD~3`...)
     #[arg(long)]
-    old_rev: String,
+    pub(crate) old_rev: String,
     /// New revision (see `--old-rev`)
     #[arg(long)]
-    new_rev: String,
+    pub(crate) new_rev: String,
     /// Project root for the old revision, used to resolve `FILE`'s
     /// absolute paths (`/lib/helpers.typ`, `json("/data.json")`...) --
     /// like `files` mode's `--old-root`, but a path relative to the
@@ -85,40 +94,40 @@ struct GitArgs {
     /// filesystem directory to point at). Defaults to `FILE`'s own parent
     /// directory; pass `.` for the repository's own root itself
     #[arg(long)]
-    old_root: Option<PathBuf>,
+    pub(crate) old_root: Option<PathBuf>,
     /// Project root for the new revision (see `--old-root`)
     #[arg(long)]
-    new_root: Option<PathBuf>,
+    pub(crate) new_root: Option<PathBuf>,
     #[command(flatten)]
-    common: CommonArgs,
+    pub(crate) common: CommonArgs,
 }
 
 /// Flags shared identically by both `files` and `git` mode.
 #[derive(clap::Args)]
-struct CommonArgs {
+pub(crate) struct CommonArgs {
     /// Don't show deleted content at all (by default, it's struck through
     /// in red)
     #[arg(long)]
-    hide_deletions: bool,
+    pub(crate) hide_deletions: bool,
     /// Don't highlight added content (by default, it's underlined in blue);
     /// when set, new content is rendered in standard style
     #[arg(long)]
-    hide_additions: bool,
+    pub(crate) hide_additions: bool,
     /// Color deleted content is struck through in. Either one of Typst's
     /// named colors (red, orange, yellow, olive, green, lime, aqua, teal,
     /// eastern, navy, blue, purple, fuchsia, maroon, black, gray, silver,
     /// white) or a hex color (`#f30`, `7a03c2`, `abcdefff`)
     #[arg(long, default_value = "red", value_parser = parse_color)]
-    deletion_color: Color,
+    pub(crate) deletion_color: Color,
     /// Color added content is underlined in. Same accepted forms as
     /// `--deletion-color`
     #[arg(long, default_value = "blue", value_parser = parse_color)]
-    addition_color: Color,
+    pub(crate) addition_color: Color,
     /// Additional directory to search recursively for fonts, on top of the
     /// ones embedded in the compiler. Can be passed multiple times; shared
     /// by both versions of the document
     #[arg(long = "font-path", value_name = "DIR")]
-    font_paths: Vec<PathBuf>,
+    pub(crate) font_paths: Vec<PathBuf>,
     /// Local directory packages (`@preview/cuti:0.4.0`,
     /// `@local/callout:0.1.0`, any namespace...) are resolved from,
     /// structured the way Typst's own package cache is
@@ -129,7 +138,23 @@ struct CommonArgs {
     /// directory (e.g. one `typst-cli` itself already cached, copied over,
     /// or one placed here by hand) can be resolved
     #[arg(long, value_name = "DIR")]
-    package_path: Option<PathBuf>,
+    pub(crate) package_path: Option<PathBuf>,
+}
+
+impl Default for CommonArgs {
+    /// Starting point for `gui.rs`'s form state -- the same defaults the
+    /// CLI's `#[arg(default_value = ...)]`/`Option::None` give when a flag
+    /// is omitted.
+    fn default() -> Self {
+        Self {
+            hide_deletions: false,
+            hide_additions: false,
+            deletion_color: Color::RED,
+            addition_color: Color::BLUE,
+            font_paths: Vec::new(),
+            package_path: None,
+        }
+    }
 }
 
 /// Parses a color the way `--deletion-color`/`--addition-color` accept it:
@@ -173,13 +198,18 @@ fn parse_color(s: &str) -> Result<Color, String> {
 }
 
 fn main() -> Result<()> {
-    match Cli::parse().command {
-        Command::Files(args) => run_files(args),
-        Command::Git(args) => run_git(args),
+    let cli = Cli::parse();
+    if cli.gui {
+        return gui::run();
+    }
+    match cli.command {
+        Some(Command::Files(args)) => run_files(args),
+        Some(Command::Git(args)) => run_git(args),
+        None => anyhow::bail!("no subcommand given -- use `files`, `git`, or `--gui`; see --help"),
     }
 }
 
-fn run_files(args: FilesArgs) -> Result<()> {
+pub(crate) fn run_files(args: FilesArgs) -> Result<()> {
     // Canonicalized (absolute, symlink-resolved) so that, whatever form
     // the user spelled `old`/`new`/`--old-root`/`--new-root` in, the main
     // file path always lexically prefixes its project root the same way
@@ -199,7 +229,7 @@ fn run_files(args: FilesArgs) -> Result<()> {
     diff_and_write(&world_old, &world_new, &args.common, &args.output)
 }
 
-fn run_git(args: GitArgs) -> Result<()> {
+pub(crate) fn run_git(args: GitArgs) -> Result<()> {
     let repo_path = canonicalize(&args.repo)?;
     let package_path = resolve_package_path(args.common.package_path.as_deref())?;
     let fonts = build_fonts(&args.common.font_paths);

@@ -14,6 +14,8 @@ Two versions can come from two separate `.typ` files (`typst-diff files`,
 the default — see section 3 below), or from the same file at two
 different revisions — a tag, a branch, or a commit — of one local git
 repository (`typst-diff git`, see "Diffing across git revisions" below).
+`typst-diff --gui` launches a graphical form for either instead of
+building the command by hand — see "Graphical interface" below.
 
 ## ⚠️ Know this before you start
 
@@ -291,6 +293,59 @@ mirror `examples/old`/`examples/new` exactly) are byte-for-byte
 identical — the whole point of `git` mode being just another way to feed
 the same two versions in.
 
+### Graphical interface
+
+```bash
+cargo run --release -- --gui
+```
+
+**On Linux, install two system packages first** — neither is pulled in
+automatically by `cargo build`, since they're system packages, not Rust
+dependencies:
+- `libegl1` (`sudo apt install libegl1` on Debian/Ubuntu, including
+  Ubuntu-on-WSL) if you hit "Found no glutin configs matching the
+  template" when opening the window;
+- `libgtk-3-dev` (`sudo apt install libgtk-3-dev pkg-config`, needed to
+  *build*; the `libgtk-3-0` most desktops already have is enough to
+  *run*) for the **Browse…** buttons' file/folder pickers to work at
+  all.
+
+See "Known limitations" below for the full story on both, plus a third
+issue (and its fix) also found getting this working on WSLg.
+
+This opens a window with a form instead of a command line: a **Files**/**Git
+revisions** switch at the top picks the mode (mirroring `typst-diff
+files`/`typst-diff git`), text fields with **Browse…** buttons fill in
+real filesystem paths for `files` mode. `git` mode's `FILE`/`--old-root`/
+`--new-root` are paths *inside the repository* at a specific revision,
+not real filesystem paths at all (nothing is ever checked out — see
+"Diffing across git revisions" above), so browsing the real filesystem
+for them would be actively misleading; instead, their own **Choose…**
+menu lists what's actually in the resolved git tree — every `.typ` file
+for `FILE` (from `--old-rev`'s tree if set, `--new-rev`'s otherwise,
+since `FILE` is one path shared by both), every directory (plus the
+repository root itself, as `.`) for `--old-root`/`--new-root` (each from
+its own revision). Typing a path by hand instead still works everywhere
+— every field is a plain text box underneath, "Choose…" only fills it
+in. `--old-rev`/`--new-rev` get the same treatment: their own
+**Choose…** lists the repository's branches and tags (typing an
+arbitrary commit still works too). The color pickers, checkboxes, and
+font-path list cover the rest of `CommonArgs`. **Generate** runs the
+same `run_files`/`run_git` the CLI itself calls, on a background thread
+so the window stays responsive, and offers an **Open** button for the
+resulting PDF once it's done.
+
+`gui.rs` is a thin layer over `main.rs`: nothing about how a diff is
+produced is reimplemented for it, only how the arguments are gathered —
+see its module doc comment. It adds three dependencies gated behind no
+feature flag of their own (so they're always pulled in, even for
+`files`/`git`-only use): [`eframe`](https://docs.rs/eframe) (window +
+widgets), [`rfd`](https://docs.rs/rfd) (native file/folder dialogs), and
+[`open`](https://docs.rs/open) (launching the PDF viewer). This is the
+one part of the project with a real, unavoidable runtime dependency on a
+display server (X11/Wayland/macOS/Windows) — everything else works
+identically over SSH/in a container.
+
 ## 4. Project structure
 
 ```
@@ -319,6 +374,7 @@ typst-diff/
 │       └── git-mode.pdf   # byte-identical to files-mode.pdf
 └── src/
     ├── main.rs          # entry point: CLI (files/git subcommands), orchestration
+    ├── gui.rs           # --gui: a form-based front end over main.rs
     ├── world.rs         # minimal implementation of `typst::World`
     └── diff.rs           # Content flattening + diff + reconstruction
 ```
@@ -547,6 +603,48 @@ typst-diff/
   `@{upstream}` or a merge-base expression, which work here as well, but
   not the working tree itself). And `FILE` is assumed to be the same path
   in both revisions — there's no support for diffing across a rename.
+- **`--gui` needs a working display, a few system packages, and
+  (depending on your desktop) a nudge away from `eframe`/`rfd`'s
+  defaults**: unlike `files`/`git` mode, `--gui` (`gui.rs`) needs a real
+  X11/Wayland/macOS/Windows display to open a window on — it won't work
+  over a plain SSH session or in most containers/CI. On WSLg (Ubuntu on
+  WSL2) specifically, four real issues were hit and fixed while building
+  this, in order — see the `eframe`/`rfd` dependencies' comment in
+  `Cargo.toml` for the full account:
+  1. `eframe`'s default `wgpu` renderer failed outright ("Failed to
+     create surface for any enabled backend") — fixed by switching to
+     the `glow` (OpenGL) renderer (`gui::run()`'s `NativeOptions`,
+     `eframe`'s `glow` feature).
+  2. `glow` then failed too ("Found no glutin configs matching the
+     template") because the `libegl1` system package wasn't installed —
+     `sudo apt install libegl1` fixed it. Not something `Cargo.toml` can
+     install for you.
+  3. With both of those fixed, the window opened but the process then
+     crashed a moment later ("Io error: Connection reset by peer", "winit
+     EventLoopError") — `accesskit` (screen-reader accessibility support,
+     on by `eframe`'s default features) was trying to reach a D-Bus/AT-SPI
+     service that isn't there (or isn't happy) under WSLg. Dropped from
+     `eframe`'s enabled features for now (along with `wgpu` and `links`,
+     neither of which this form uses either).
+  4. With the window finally open and stable, every **Browse…** button
+     silently did nothing — `rfd`'s default "xdg-portal" backend asks
+     the `xdg-desktop-portal` D-Bus service to show a dialog, and WSLg
+     doesn't run one (no full desktop session — `echo
+     $XDG_CURRENT_DESKTOP` is empty). Switched to `rfd`'s `gtk3` feature
+     instead, which shows GTK's own file chooser directly, with no portal
+     service involved — needs `libgtk-3-dev` (`+ pkg-config`) to build,
+     `libgtk-3-0` to run.
+
+  A sandboxed dev container used earlier in development never got any
+  renderer working at all, not even after installing `libegl1` — most
+  likely missing GLX/EGL support entirely in its particular X11
+  forwarding setup, software rendering included, rather than anything
+  `gui.rs` can detect or route around on its own. If `--gui` still won't
+  open a window (or its **Browse…** buttons still don't do anything) for
+  you after all the above, that's the kind of environment limitation to
+  suspect next. `files`/`git` mode (and `gui.rs`'s own non-rendering
+  logic, covered by `cargo test`) don't depend on any of this and work
+  regardless.
 
 ## If `cargo build` fails
 
