@@ -10,17 +10,18 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use eframe::egui;
 use typst::visualize::Color;
+use typst_layout::PagedDocument;
 
-use crate::{run_files, run_git, CommonArgs, FilesArgs, GitArgs};
+use crate::{build_files_worlds, build_git_worlds, diff_and_layout, run_files, run_git, CommonArgs, FilesArgs, GitArgs};
 
 pub fn run() -> Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([760.0, 680.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1180.0, 760.0]),
         // eframe's default renderer (`wgpu`) fails outright ("Failed to
         // create surface for any enabled backend") in some environments
         // that otherwise have a perfectly usable display -- confirmed on
@@ -54,6 +55,15 @@ enum Status {
     Error(String),
 }
 
+/// What the background preview job (see `App::preview_job`) is doing, for
+/// the preview panel on the right of the window.
+enum Preview {
+    Idle,
+    Running,
+    Ready(Vec<egui::TextureHandle>),
+    Error(String),
+}
+
 struct App {
     mode: Mode,
 
@@ -61,6 +71,13 @@ struct App {
     files_old: String,
     files_new: String,
     files_output: String,
+    /// Left empty by default (unlike `git_old_root`): `run_files` then
+    /// defaults it to `files_old`'s own parent directory, a real
+    /// filesystem path that's usually right for a project laid out with
+    /// its entry point at (or right under) its own root. `.` would mean
+    /// something different and far less often correct here -- the
+    /// process's current working directory, unrelated to `files_old`'s
+    /// location.
     files_old_root: String,
     files_new_root: String,
 
@@ -91,6 +108,57 @@ struct App {
     /// `Some` while a `run_files`/`run_git` call is in flight on another
     /// thread -- polled (non-blockingly) from `update()`.
     job: Option<mpsc::Receiver<Result<PathBuf, String>>>,
+
+    preview: Preview,
+    /// `Some` while a preview render is in flight on another thread --
+    /// polled (non-blockingly) from `update()`. Carries rendered pages as
+    /// plain pixel buffers, not yet `App::preview`'s `TextureHandle`s:
+    /// uploading a texture to the GPU needs the `egui::Context`, which
+    /// only the UI thread has.
+    preview_job: Option<mpsc::Receiver<Result<Vec<egui::ColorImage>, String>>>,
+
+    /// Whether to re-run `Self::start_preview` on its own, a short while
+    /// after any form field changes -- see `Self::maybe_auto_preview`.
+    auto_preview: bool,
+    /// The form's own state, as of the last frame -- compared against
+    /// the current one each frame to notice a change at all (see
+    /// `Self::snapshot`/`Self::maybe_auto_preview`). Always `Some` after
+    /// the first frame; only `None` so `App::default()` doesn't need to
+    /// duplicate every field's default just to build one.
+    last_snapshot: Option<FormSnapshot>,
+    /// Set the moment the snapshot last changed, cleared once
+    /// `Self::start_preview` actually fires for it -- `maybe_auto_preview`
+    /// waits for `AUTO_PREVIEW_DEBOUNCE` of quiet after the *last* change
+    /// before firing, so typing several characters in a row triggers one
+    /// re-render, not one per keystroke.
+    dirty_since: Option<Instant>,
+}
+
+/// The part of `App`'s state that actually affects what a diff renders
+/// as -- everything `Self::build_files_args`/`Self::build_git_args`
+/// read, other than the output path (which affects where "Generate"
+/// would save, not what the preview shows) and `git_refs`/`git_refs_for`
+/// (derived, not user input). Compared frame to frame by
+/// `Self::maybe_auto_preview` to notice a change worth re-previewing.
+#[derive(Clone, PartialEq)]
+struct FormSnapshot {
+    mode: Mode,
+    files_old: String,
+    files_new: String,
+    files_old_root: String,
+    files_new_root: String,
+    git_repo: String,
+    git_file: String,
+    git_old_rev: String,
+    git_new_rev: String,
+    git_old_root: String,
+    git_new_root: String,
+    hide_deletions: bool,
+    hide_additions: bool,
+    deletion_color: egui::Color32,
+    addition_color: egui::Color32,
+    font_paths: Vec<String>,
+    package_path: String,
 }
 
 impl Default for App {
@@ -107,8 +175,18 @@ impl Default for App {
             git_output: "diff.pdf".to_string(),
             git_old_rev: String::new(),
             git_new_rev: String::new(),
-            git_old_root: String::new(),
-            git_new_root: String::new(),
+            // Defaults to the repository root rather than empty (unlike
+            // `files` mode's own root fields -- see `App::files_old_root`'s
+            // doc comment): the far more common case for `git` mode is a
+            // project whose entry point isn't at the repository root
+            // (e.g. `src/main.typ`) but whose absolute imports still mean
+            // the repository root, not `FILE`'s own directory -- leaving
+            // this empty produces a working-but-wrong default that fails
+            // confusingly on any absolute import (`git_root_field`'s
+            // "Choose…" still lists every other directory, for the
+            // uncommon case where a different one is actually needed).
+            git_old_root: ".".to_string(),
+            git_new_root: ".".to_string(),
             git_refs: Vec::new(),
             git_refs_for: String::new(),
             hide_deletions: false,
@@ -119,6 +197,11 @@ impl Default for App {
             package_path: String::new(),
             status: Status::Idle,
             job: None,
+            preview: Preview::Idle,
+            preview_job: None,
+            auto_preview: true,
+            last_snapshot: None,
+            dirty_since: None,
         }
     }
 }
@@ -126,34 +209,52 @@ impl Default for App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_job(ui.ctx());
+        self.poll_preview(ui.ctx());
 
         if self.mode == Mode::Git && self.git_repo != self.git_refs_for {
             self.refresh_git_refs();
         }
 
         // `Self::ui`'s own `ui` has no margin/background (see its doc
-        // comment) -- a nested `CentralPanel` gives it both.
+        // comment) -- nested panels give both. The form lives in a
+        // resizable side panel so the preview on the right (see
+        // `Self::preview_panel`) gets to keep most of the window.
+        egui::Panel::left("form")
+            .resizable(true)
+            .default_size(380.0)
+            .size_range(280.0..=600.0)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.heading("typst-diff");
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.mode, Mode::Files, "Files");
+                        ui.selectable_value(&mut self.mode, Mode::Git, "Git revisions");
+                    });
+                    ui.add_space(8.0);
+
+                    match self.mode {
+                        Mode::Files => self.files_form(ui),
+                        Mode::Git => self.git_form(ui),
+                    }
+
+                    ui.separator();
+                    self.common_form(ui);
+
+                    ui.separator();
+                    self.status_and_generate(ui);
+                });
+            });
+
         egui::CentralPanel::default().show(ui, |ui| {
-            ui.heading("typst-diff");
-            ui.add_space(4.0);
-
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.mode, Mode::Files, "Files");
-                ui.selectable_value(&mut self.mode, Mode::Git, "Git revisions");
-            });
-            ui.add_space(8.0);
-
-            egui::ScrollArea::vertical().show(ui, |ui| match self.mode {
-                Mode::Files => self.files_form(ui),
-                Mode::Git => self.git_form(ui),
-            });
-
-            ui.separator();
-            self.common_form(ui);
-
-            ui.separator();
-            self.status_and_generate(ui);
+            self.preview_panel(ui);
         });
+
+        // Checked after the form above, so this frame's own edits (a
+        // keystroke, a picked path, a toggled checkbox...) are already
+        // reflected in `self`.
+        self.maybe_auto_preview(ui.ctx());
     }
 }
 
@@ -235,10 +336,18 @@ impl App {
 
     fn status_and_generate(&mut self, ui: &mut egui::Ui) {
         let running = matches!(self.status, Status::Running);
+        let previewing = matches!(self.preview, Preview::Running);
         ui.horizontal(|ui| {
+            if ui.add_enabled(!previewing, egui::Button::new("Preview")).clicked() {
+                self.start_preview();
+            }
+            ui.checkbox(&mut self.auto_preview, "Auto preview")
+                .on_hover_text("Re-render the preview automatically, shortly after any field changes.");
             if ui.add_enabled(!running, egui::Button::new("Generate")).clicked() {
                 self.start_job();
             }
+        });
+        ui.horizontal(|ui| {
             match &self.status {
                 Status::Idle => {}
                 Status::Running => {
@@ -321,6 +430,173 @@ impl App {
         }
     }
 
+    /// Renders the current `self.preview` state: an idle hint, a spinner,
+    /// the error text, or every rendered page stacked vertically,
+    /// downscaled to fit the panel's width (never upscaled past each
+    /// page's own rendered resolution).
+    fn preview_panel(&mut self, ui: &mut egui::Ui) {
+        match &self.preview {
+            Preview::Idle => {
+                ui.centered_and_justified(|ui| {
+                    ui.weak("Click \"Preview\" to render the diff here.");
+                });
+            }
+            Preview::Running => {
+                ui.centered_and_justified(|ui| {
+                    ui.spinner();
+                });
+            }
+            Preview::Error(err) => {
+                egui::ScrollArea::both().show(ui, |ui| {
+                    ui.colored_label(egui::Color32::from_rgb(0xd6, 0x33, 0x33), err);
+                });
+            }
+            Preview::Ready(pages) => {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let available = ui.available_width();
+                    for (i, page) in pages.iter().enumerate() {
+                        if i > 0 {
+                            ui.add_space(8.0);
+                        }
+                        let native = page.size_vec2();
+                        let scale = (available / native.x).min(1.0);
+                        ui.image((page.id(), native * scale));
+                    }
+                });
+            }
+        }
+    }
+
+    /// Builds the current form's `FilesArgs`/`GitArgs` and spawns a
+    /// background thread that diffs, lays out, and rasterizes every page
+    /// (via [`diff_and_layout`] + [`render_pages`]) -- everything
+    /// "Generate" does up to producing a PDF, minus actually producing
+    /// one: no file is read back afterward, and nothing is written to
+    /// disk. Pixels come back as plain `ColorImage`s (see
+    /// `App::preview_job`'s doc comment for why), turned into
+    /// `TextureHandle`s once they arrive, in [`Self::poll_preview`].
+    fn start_preview(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        self.preview_job = Some(rx);
+        self.preview = Preview::Running;
+
+        match self.mode {
+            Mode::Files => {
+                let args = self.build_files_args();
+                std::thread::spawn(move || {
+                    let result = (|| -> Result<Vec<egui::ColorImage>> {
+                        let (world_old, world_new) = build_files_worlds(&args)?;
+                        let document = diff_and_layout(&world_old, &world_new, &args.common)?;
+                        Ok(render_pages(&document))
+                    })()
+                    .map_err(|err| format!("{err:?}"));
+                    let _ = tx.send(result);
+                });
+            }
+            Mode::Git => {
+                let args = self.build_git_args();
+                std::thread::spawn(move || {
+                    let result = (|| -> Result<Vec<egui::ColorImage>> {
+                        let (world_old, world_new) = build_git_worlds(&args)?;
+                        let document = diff_and_layout(&world_old, &world_new, &args.common)?;
+                        Ok(render_pages(&document))
+                    })()
+                    .map_err(|err| format!("{err:?}"));
+                    let _ = tx.send(result);
+                });
+            }
+        }
+    }
+
+    /// Non-blockingly checks whether `start_preview`'s background thread
+    /// has produced pages yet, and, if so, uploads them as textures (only
+    /// possible here, on the UI thread -- see `App::preview_job`'s doc
+    /// comment) and updates `self.preview`.
+    fn poll_preview(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.preview_job else { return };
+        match rx.try_recv() {
+            Ok(Ok(images)) => {
+                let textures = images
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, image)| {
+                        ctx.load_texture(format!("preview-page-{i}"), image, egui::TextureOptions::LINEAR)
+                    })
+                    .collect();
+                self.preview = Preview::Ready(textures);
+                self.preview_job = None;
+            }
+            Ok(Err(err)) => {
+                self.preview = Preview::Error(err);
+                self.preview_job = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.preview = Preview::Error("the worker thread panicked".to_string());
+                self.preview_job = None;
+            }
+        }
+    }
+
+    fn snapshot(&self) -> FormSnapshot {
+        FormSnapshot {
+            mode: self.mode,
+            files_old: self.files_old.clone(),
+            files_new: self.files_new.clone(),
+            files_old_root: self.files_old_root.clone(),
+            files_new_root: self.files_new_root.clone(),
+            git_repo: self.git_repo.clone(),
+            git_file: self.git_file.clone(),
+            git_old_rev: self.git_old_rev.clone(),
+            git_new_rev: self.git_new_rev.clone(),
+            git_old_root: self.git_old_root.clone(),
+            git_new_root: self.git_new_root.clone(),
+            hide_deletions: self.hide_deletions,
+            hide_additions: self.hide_additions,
+            deletion_color: self.deletion_color,
+            addition_color: self.addition_color,
+            font_paths: self.font_paths.clone(),
+            package_path: self.package_path.clone(),
+        }
+    }
+
+    /// How long to wait, after the *last* change, before actually
+    /// re-rendering -- long enough that typing several characters in a
+    /// row (a path, a revision...) fires one re-render, not one per
+    /// keystroke.
+    const AUTO_PREVIEW_DEBOUNCE: Duration = Duration::from_millis(500);
+
+    /// Notices whether anything `Self::snapshot` covers changed this
+    /// frame and, if `self.auto_preview` is on, (re-)starts the
+    /// `AUTO_PREVIEW_DEBOUNCE` countdown for it; once that countdown
+    /// elapses with no further change, fires `Self::start_preview`. Keeps
+    /// requesting repaints while the countdown is running so it's
+    /// actually checked again even without further input (mouse-move,
+    /// keystroke, ...) to trigger one on its own.
+    fn maybe_auto_preview(&mut self, ctx: &egui::Context) {
+        let snapshot = self.snapshot();
+        // `None` only on the very first frame -- nothing to compare
+        // against yet, and nothing worth previewing this early either
+        // (every field is still at its starting value).
+        let changed = self.last_snapshot.as_ref().is_some_and(|prev| *prev != snapshot);
+        self.last_snapshot = Some(snapshot);
+        if changed && self.auto_preview {
+            self.dirty_since = Some(Instant::now());
+        }
+
+        if let Some(since) = self.dirty_since {
+            let elapsed = since.elapsed();
+            if elapsed >= Self::AUTO_PREVIEW_DEBOUNCE {
+                self.dirty_since = None;
+                self.start_preview();
+            } else {
+                ctx.request_repaint_after(Self::AUTO_PREVIEW_DEBOUNCE - elapsed);
+            }
+        }
+    }
+
     fn build_files_args(&self) -> FilesArgs {
         FilesArgs {
             old: PathBuf::from(&self.files_old),
@@ -389,6 +665,30 @@ impl App {
 fn color32_to_typst(c: egui::Color32) -> Color {
     let [r, g, b, a] = c.to_srgba_unmultiplied();
     Color::from_u8(r, g, b, a)
+}
+
+/// Rasterizes every page of `document` (the `typst-render` crate --
+/// separate from `typst-pdf`, which `write_pdf` in `main.rs` uses for the
+/// real, on-disk output) into an `egui::ColorImage`, ready to be uploaded
+/// as a texture (see `App::poll_preview`) once back on the UI thread.
+///
+/// `tiny_skia::Pixmap` (what `typst_render::render` returns) stores
+/// premultiplied-alpha RGBA8 pixels, the same representation
+/// `egui::Color32`/`ColorImage` use internally -- `pixmap.data()`'s bytes
+/// can be handed to `from_rgba_premultiplied` as-is, no conversion.
+fn render_pages(document: &PagedDocument) -> Vec<egui::ColorImage> {
+    let options = typst_render::RenderOptions::default();
+    document
+        .pages()
+        .iter()
+        .map(|page| {
+            let pixmap = typst_render::render(page, &options);
+            egui::ColorImage::from_rgba_premultiplied(
+                [pixmap.width() as usize, pixmap.height() as usize],
+                pixmap.data(),
+            )
+        })
+        .collect()
 }
 
 fn non_empty_path(s: &str) -> Option<PathBuf> {

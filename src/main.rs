@@ -210,6 +210,22 @@ fn main() -> Result<()> {
 }
 
 pub(crate) fn run_files(args: FilesArgs) -> Result<()> {
+    let (world_old, world_new) = build_files_worlds(&args)?;
+    let document = diff_and_layout(&world_old, &world_new, &args.common)?;
+    write_pdf(&document, &args.output)
+}
+
+pub(crate) fn run_git(args: GitArgs) -> Result<()> {
+    let (world_old, world_new) = build_git_worlds(&args)?;
+    let document = diff_and_layout(&world_old, &world_new, &args.common)?;
+    write_pdf(&document, &args.output)
+}
+
+/// Builds the "old"/"new" `SimpleWorld` pair for `files` mode -- the
+/// first half of [`run_files`], split out so `gui.rs`'s preview (which
+/// needs the laid-out `PagedDocument`, via [`diff_and_layout`], but not a
+/// PDF written to disk) can reuse it too.
+pub(crate) fn build_files_worlds(args: &FilesArgs) -> Result<(SimpleWorld, SimpleWorld)> {
     // Canonicalized (absolute, symlink-resolved) so that, whatever form
     // the user spelled `old`/`new`/`--old-root`/`--new-root` in, the main
     // file path always lexically prefixes its project root the same way
@@ -225,11 +241,12 @@ pub(crate) fn run_files(args: FilesArgs) -> Result<()> {
     // rooted at its own project root.
     let world_old = SimpleWorld::from_directory(&old_main, &old_root, fonts.clone(), package_path.clone())?;
     let world_new = SimpleWorld::from_directory(&new_main, &new_root, fonts, package_path)?;
-
-    diff_and_write(&world_old, &world_new, &args.common, &args.output)
+    Ok((world_old, world_new))
 }
 
-pub(crate) fn run_git(args: GitArgs) -> Result<()> {
+/// Like [`build_files_worlds`], but for `git` mode -- the first half of
+/// [`run_git`].
+pub(crate) fn build_git_worlds(args: &GitArgs) -> Result<(SimpleWorld, SimpleWorld)> {
     let repo_path = canonicalize(&args.repo)?;
     let package_path = resolve_package_path(args.common.package_path.as_deref())?;
     let fonts = build_fonts(&args.common.font_paths);
@@ -253,8 +270,7 @@ pub(crate) fn run_git(args: GitArgs) -> Result<()> {
         fonts,
         package_path,
     )?;
-
-    diff_and_write(&world_old, &world_new, &args.common, &args.output)
+    Ok((world_old, world_new))
 }
 
 /// Fonts are a project-wide setting (not specific to either version of the
@@ -283,12 +299,16 @@ fn resolve_package_path(package_path: Option<&Path>) -> Result<Option<PathBuf>> 
 /// Diffs the two worlds and writes the resulting annotated PDF to `output`
 /// -- the shared tail end of both `run_files` and `run_git`, once each has
 /// built its own pair of `SimpleWorld`s.
-fn diff_and_write(
+/// Diffs the two worlds and lays out the result, without exporting it to
+/// PDF yet -- the shared middle of `run_files`/`run_git` (which then call
+/// [`write_pdf`]) and `gui.rs`'s preview (which rasterizes the returned
+/// `PagedDocument` straight into a texture instead, with no PDF or file
+/// on disk involved at all).
+pub(crate) fn diff_and_layout(
     world_old: &SimpleWorld,
     world_new: &SimpleWorld,
     common: &CommonArgs,
-    output: &Path,
-) -> Result<()> {
+) -> Result<PagedDocument> {
     let content_old = eval_to_content(world_old)?;
     let content_new = eval_to_content(world_new)?;
 
@@ -312,10 +332,15 @@ fn diff_and_write(
 
     // Lays out this annotated content, reusing the "world" of the new
     // version (for fonts, the standard library, etc.)
-    let document = layout(world_new, &annotated)?;
+    layout(world_new, &annotated)
+}
 
+/// Exports an already laid-out document to PDF and writes it to `output`
+/// -- the second half of `run_files`/`run_git`, once each has built its
+/// own [`diff_and_layout`] result.
+pub(crate) fn write_pdf(document: &PagedDocument, output: &Path) -> Result<()> {
     let pdf_options = typst_pdf::PdfOptions::default();
-    let pdf_bytes = typst_pdf::pdf(&document, &pdf_options)
+    let pdf_bytes = typst_pdf::pdf(document, &pdf_options)
         .map_err(|errs| anyhow::anyhow!("PDF export error: {errs:?}"))?;
 
     std::fs::write(output, pdf_bytes).with_context(|| format!("writing {output:?}"))?;
