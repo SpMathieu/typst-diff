@@ -116,6 +116,15 @@ struct App {
     /// uploading a texture to the GPU needs the `egui::Context`, which
     /// only the UI thread has.
     preview_job: Option<mpsc::Receiver<Result<Vec<egui::ColorImage>, String>>>,
+    /// The `egui::Scene` pan+zoom canvas's own view state for
+    /// `App::preview_panel` -- which part of the (page-pixel-sized)
+    /// scene is currently visible. `Rect::ZERO` (its starting value)
+    /// means "not yet initialized," which `Scene::show` reads as "fit
+    /// the content" -- see `Self::preview_panel`'s "Reset view" button.
+    /// Deliberately not part of `FormSnapshot`: panning/zooming doesn't
+    /// change what the diff *is*, so it has no business re-triggering a
+    /// preview render.
+    scene_rect: egui::Rect,
 
     /// Whether to re-run `Self::start_preview` on its own, a short while
     /// after any form field changes -- see `Self::maybe_auto_preview`.
@@ -199,6 +208,7 @@ impl Default for App {
             job: None,
             preview: Preview::Idle,
             preview_job: None,
+            scene_rect: egui::Rect::ZERO,
             auto_preview: true,
             last_snapshot: None,
             dirty_since: None,
@@ -431,10 +441,32 @@ impl App {
     }
 
     /// Renders the current `self.preview` state: an idle hint, a spinner,
-    /// the error text, or every rendered page stacked vertically,
-    /// downscaled to fit the panel's width (never upscaled past each
-    /// page's own rendered resolution).
+    /// the error text, or every rendered page stacked vertically inside an
+    /// `egui::Scene` -- a pan+zoom canvas (think a diagram editor, or any
+    /// image viewer), not a plain `ScrollArea`: drag (any mouse button) or
+    /// scroll to pan in any direction, Ctrl+scroll or a touchpad/touch
+    /// pinch to zoom, all handled by `Scene` itself. An initial attempt
+    /// built this out of `ScrollArea` plus manually watching
+    /// `egui::InputState::zoom_delta()` for Ctrl+scroll, but a plain
+    /// `ScrollArea` only ever scrolls vertically from the wheel unless the
+    /// content overflows horizontally *and* Shift is held for that axis
+    /// too -- workable for reading a page top to bottom, useless for
+    /// panning around once zoomed in past the panel's width. `Scene`
+    /// doesn't have that limitation (nor any scrollbars to speak of).
     fn preview_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.button("Reset view").clicked() {
+                // `Scene::show` treats a zero-sized `scene_rect` as
+                // "uninitialized" and recomputes it to fit the content --
+                // see its own doc comment -- so this is also what
+                // `self.scene_rect` starts as, before the user has ever
+                // panned/zoomed anything.
+                self.scene_rect = egui::Rect::ZERO;
+            }
+            ui.weak("(scroll or drag to pan, Ctrl+scroll or pinch to zoom)");
+        });
+        ui.separator();
+
         match &self.preview {
             Preview::Idle => {
                 ui.centered_and_justified(|ui| {
@@ -452,16 +484,15 @@ impl App {
                 });
             }
             Preview::Ready(pages) => {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let available = ui.available_width();
-                    for (i, page) in pages.iter().enumerate() {
-                        if i > 0 {
-                            ui.add_space(8.0);
+                egui::Scene::new().zoom_range(0.05..=8.0).show(ui, &mut self.scene_rect, |ui| {
+                    ui.vertical(|ui| {
+                        for (i, page) in pages.iter().enumerate() {
+                            if i > 0 {
+                                ui.add_space(8.0);
+                            }
+                            ui.image((page.id(), page.size_vec2()));
                         }
-                        let native = page.size_vec2();
-                        let scale = (available / native.x).min(1.0);
-                        ui.image((page.id(), native * scale));
-                    }
+                    });
                 });
             }
         }
