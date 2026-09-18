@@ -283,6 +283,14 @@ crucially, nothing ever written to disk or to the repository's working
 tree, so it's safe to run against a repository you have other work in
 progress in.
 
+`examples/output/` has the resulting PDFs checked in, so you can see what
+both modes produce without building anything: `files-mode.pdf` (from the
+first command in section 3) and `git-mode.pdf` (from
+`examples/git-project`'s `example-old`/`example-new` branches, which
+mirror `examples/old`/`examples/new` exactly) are byte-for-byte
+identical — the whole point of `git` mode being just another way to feed
+the same two versions in.
+
 ## 4. Project structure
 
 ```
@@ -304,8 +312,11 @@ typst-diff/
 │   │   └── ...           # same layout, updated content throughout
 │   ├── fonts/            # --font-path example dir (empty except a README)
 │   ├── packages/         # --package-path example dir (preview + local)
-│   └── git-project/      # `typst-diff git` example (its own repo -- a
-│       └── ...            # submodule; see its own note below)
+│   ├── git-project/      # `typst-diff git` example (its own repo -- a
+│   │   └── ...            # submodule; see its own note below)
+│   └── output/           # checked-in PDFs produced by the commands above
+│       ├── files-mode.pdf
+│       └── git-mode.pdf   # byte-identical to files-mode.pdf
 └── src/
     ├── main.rs          # entry point: CLI (files/git subcommands), orchestration
     ├── world.rs         # minimal implementation of `typst::World`
