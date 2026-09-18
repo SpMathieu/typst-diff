@@ -1,0 +1,3 @@
+[submodule "examples/git-project"]
+	path = examples/git-project
+	url = git@github.com:SpMathieu/typst-diff-git-example.git
