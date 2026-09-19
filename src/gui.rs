@@ -117,14 +117,26 @@ struct App {
     /// only the UI thread has.
     preview_job: Option<mpsc::Receiver<Result<Vec<egui::ColorImage>, String>>>,
     /// The `egui::Scene` pan+zoom canvas's own view state for
-    /// `App::preview_panel` -- which part of the (page-pixel-sized)
-    /// scene is currently visible. `Rect::ZERO` (its starting value)
-    /// means "not yet initialized," which `Scene::show` reads as "fit
-    /// the content" -- see `Self::preview_panel`'s "Reset view" button.
+    /// `App::preview_panel` -- which part of the (page-pixel-sized) scene
+    /// is currently visible. Computed by `Self::preview_panel` itself
+    /// (see `Self::fit_width_pending`) rather than left for `Scene::show`
+    /// to default on its own: `Scene`'s own "fit an invalid rect" logic
+    /// fits the *whole* page (width and height both), letterboxing
+    /// whichever axis doesn't match the panel's own aspect ratio --
+    /// almost never what "fit width" means for a document page.
     /// Deliberately not part of `FormSnapshot`: panning/zooming doesn't
     /// change what the diff *is*, so it has no business re-triggering a
     /// preview render.
     scene_rect: egui::Rect,
+    /// Set whenever the view should snap to "fit width" again on the
+    /// next frame the preview is actually shown in (see
+    /// `Self::preview_panel`) -- true from the start (so the very first
+    /// preview starts fitted) and after "Fit to window" is clicked, but
+    /// deliberately *not* on every routine preview refresh (auto-preview
+    /// or otherwise): re-fitting on every refresh would fight the user's
+    /// own panning/zooming the moment anything changed, which is the
+    /// opposite of what a "live" preview should do.
+    fit_width_pending: bool,
 
     /// Whether to re-run `Self::start_preview` on its own, a short while
     /// after any form field changes -- see `Self::maybe_auto_preview`.
@@ -209,6 +221,7 @@ impl Default for App {
             preview: Preview::Idle,
             preview_job: None,
             scene_rect: egui::Rect::ZERO,
+            fit_width_pending: true,
             auto_preview: true,
             last_snapshot: None,
             dirty_since: None,
@@ -455,13 +468,8 @@ impl App {
     /// doesn't have that limitation (nor any scrollbars to speak of).
     fn preview_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("Reset view").clicked() {
-                // `Scene::show` treats a zero-sized `scene_rect` as
-                // "uninitialized" and recomputes it to fit the content --
-                // see its own doc comment -- so this is also what
-                // `self.scene_rect` starts as, before the user has ever
-                // panned/zoomed anything.
-                self.scene_rect = egui::Rect::ZERO;
+            if ui.button("Fit width").clicked() {
+                self.fit_width_pending = true;
             }
             ui.weak("(scroll or drag to pan, Ctrl+scroll or pinch to zoom)");
         });
@@ -484,6 +492,43 @@ impl App {
                 });
             }
             Preview::Ready(pages) => {
+                if self.fit_width_pending {
+                    // A page's width (assumed the same for every page --
+                    // true for any document that doesn't itself change
+                    // paper size/orientation mid-way through) filling the
+                    // panel's own width exactly, with `scene_rect` given
+                    // the panel's own aspect ratio so `Scene`'s uniform
+                    // scale-to-fit (it never distorts width/height
+                    // independently) lands on that same width-fit scale
+                    // for the height too -- no letterboxing on either
+                    // axis, unlike leaving `Scene` to fit an invalid rect
+                    // on its own (which fits the *whole* page instead,
+                    // both dimensions, at whichever's the tighter
+                    // constraint).
+                    //
+                    // Only the width/zoom changes -- the vertical center
+                    // of whatever's already in view is kept exactly where
+                    // it is, rather than jumping back to the top of the
+                    // document, *unless* this is the very first fit ever
+                    // (`scene_rect` still at its `Rect::ZERO` sentinel),
+                    // which starts at the top since there's no prior view
+                    // to preserve.
+                    let available = ui.available_size();
+                    if let Some(width) = pages.first().map(|page| page.size_vec2().x) {
+                        if width > 0.0 && available.x > 0.0 && available.y > 0.0 {
+                            let height = width * (available.y / available.x);
+                            let center_y = if self.scene_rect == egui::Rect::ZERO {
+                                height / 2.0
+                            } else {
+                                self.scene_rect.center().y
+                            };
+                            let min = egui::pos2(0.0, center_y - height / 2.0);
+                            self.scene_rect = egui::Rect::from_min_size(min, egui::vec2(width, height));
+                        }
+                    }
+                    self.fit_width_pending = false;
+                }
+
                 egui::Scene::new().zoom_range(0.05..=8.0).show(ui, &mut self.scene_rect, |ui| {
                     ui.vertical(|ui| {
                         for (i, page) in pages.iter().enumerate() {
@@ -556,6 +601,17 @@ impl App {
                     .collect();
                 self.preview = Preview::Ready(textures);
                 self.preview_job = None;
+                // Deliberately does NOT touch `self.fit_width_pending`
+                // here: it's already `true` on the very first preview
+                // (see `App::default()`), and a routine refresh (whether
+                // auto-preview or a manual re-click) must leave the
+                // user's own pan/zoom alone rather than fight it on every
+                // change -- see `fit_width_pending`'s own doc comment.
+                // (An earlier version tried to detect "is this the first
+                // preview" from `self.preview`'s own variant here, but by
+                // this point `start_preview` has already overwritten it
+                // with `Running`, so it always looked like "nothing was
+                // showing yet" and re-fit on every single refresh.)
             }
             Ok(Err(err)) => {
                 self.preview = Preview::Error(err);
