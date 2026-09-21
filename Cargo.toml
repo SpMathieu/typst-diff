@@ -35,9 +35,14 @@ typst-kit = { version = "0.15", features = ["embedded-fonts", "scan-fonts"] }
 # Reads git objects directly (no checkout) for `typst-diff git`'s
 # --old-rev/--new-rev -- see world.rs's `Backend::Git`. "revision" backs
 # `Repository::rev_parse_single`, which resolves a tag, branch, or commit
-# the same way `git rev-parse` does. Pure Rust (no libgit2/openssl), unlike
-# `git2`, keeping this dependency-light and friendly to static musl builds.
-gix = { version = "0.87", default-features = false, features = ["revision", "sha1"] }
+# the same way `git rev-parse` does. "attributes" backs
+# `Repository::submodules()`, used to find and open a submodule's own
+# repository when a file being read lives inside one (see world.rs's
+# `open_submodule`) -- it's the smallest feature gix gates that behind,
+# pulling in `.gitignore`/index/filter support we don't otherwise use,
+# but still pure Rust (no libgit2/openssl), unlike `git2`, keeping this
+# dependency-light and friendly to static musl builds.
+gix = { version = "0.87", default-features = false, features = ["revision", "sha1", "attributes"] }
 # Backs `--gui` (see gui.rs): eframe/egui for the window and widgets, rfd
 # for native file/folder picker dialogs, open to launch the generated PDF
 # in its default viewer.

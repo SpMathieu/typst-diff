@@ -112,27 +112,119 @@ impl Backend {
                 // this isn't a hot path (a handful of files per document).
                 let repo = gix::open(repo_path)
                     .map_err(|err| FileError::Other(Some(eco_format!("{err}"))))?;
-                let tree = repo
-                    .find_object(*tree)
-                    .map_err(|err| FileError::Other(Some(eco_format!("{err}"))))?
-                    .into_tree();
-                let entry = tree
-                    .lookup_entry_by_path(&path)
-                    .map_err(|err| FileError::Other(Some(eco_format!("{err}"))))?
-                    .ok_or_else(|| FileError::NotFound(path.clone()))?;
-                if entry.mode().is_tree() {
-                    return Err(FileError::IsDirectory);
-                }
-                let object = entry
-                    .object()
-                    .map_err(|err| FileError::Other(Some(eco_format!("{err}"))))?;
-                // Can't move `object.data` out: `Object` implements `Drop`
-                // (to return its buffer to `repo`'s reuse pool), and Rust
-                // forbids partially moving out of a `Drop` type.
-                Ok(object.data.clone())
+                read_from_tree(repo, *tree, &path)
             }
         }
     }
+}
+
+/// Reads the blob at `path` (relative to the tree `tree_id` names, in
+/// `repo`), one path component at a time.
+///
+/// This exists instead of the obvious one-liner,
+/// `repo.find_object(tree_id)?.into_tree().lookup_entry_by_path(path)`,
+/// because that doesn't handle `path` crossing into a git submodule: a
+/// submodule is recorded in its parent tree as a "commit" entry (a
+/// "gitlink"), naming a commit of a *different* repository rather than a
+/// tree or blob of this one, and gix's own path lookup doesn't know to
+/// treat that specially -- it just tries to look the gitlink's object id
+/// up as a tree in `repo`'s own object database, where it never is (a
+/// submodule's objects live in its own repository, initialized
+/// separately by `git submodule update --init` -- typically into
+/// `<repo>/.git/modules/<name>`), and so reports the path "not found"
+/// for any file inside a submodule.
+///
+/// This walks the same path by hand instead so that a gitlink entry
+/// encountered along the way (not just as the final component) can be
+/// followed into that other repository, opened via
+/// [`open_submodule`], and resolved further there against the exact
+/// commit this tree records -- not whatever the submodule happens to be
+/// checked out at right now. Recurses for a submodule that itself
+/// contains submodules.
+fn read_from_tree(repo: gix::Repository, tree_id: gix::ObjectId, path: &Path) -> FileResult<Vec<u8>> {
+    let not_found = || FileError::NotFound(path.to_path_buf());
+
+    let mut tree = repo
+        .find_object(tree_id)
+        .map_err(|err| FileError::Other(Some(eco_format!("{err}"))))?
+        .into_tree();
+    let mut components = path.components().peekable();
+    let mut prefix = PathBuf::new();
+
+    while let Some(component) = components.next() {
+        let entry = tree
+            .find_entry(component.as_os_str().as_encoded_bytes())
+            .ok_or_else(not_found)?;
+        prefix.push(component);
+
+        if components.peek().is_none() {
+            if entry.mode().is_tree() || entry.mode().is_commit() {
+                return Err(FileError::IsDirectory);
+            }
+            let object = entry
+                .object()
+                .map_err(|err| FileError::Other(Some(eco_format!("{err}"))))?;
+            // Can't move `object.data` out: `Object` implements `Drop`
+            // (to return its buffer to `repo`'s reuse pool), and Rust
+            // forbids partially moving out of a `Drop` type.
+            return Ok(object.data.clone());
+        }
+
+        if entry.mode().is_commit() {
+            let submodule_repo = open_submodule(&repo, &prefix).ok_or_else(|| {
+                FileError::Other(Some(eco_format!(
+                    "{path:?} is inside the git submodule at {prefix:?}, but it couldn't be \
+                     resolved -- is it declared in .gitmodules and initialized \
+                     (`git submodule update --init`)?"
+                )))
+            })?;
+            let submodule_tree = submodule_repo
+                .find_object(entry.object_id())
+                .map_err(|err| FileError::Other(Some(eco_format!("{err}"))))?
+                .into_commit()
+                .tree()
+                .map_err(|err| FileError::Other(Some(eco_format!("{err}"))))?
+                .id()
+                .detach();
+            let rest: PathBuf = components.collect();
+            return read_from_tree(submodule_repo, submodule_tree, &rest);
+        }
+
+        if !entry.mode().is_tree() {
+            return Err(not_found());
+        }
+        tree = entry
+            .object()
+            .map_err(|err| FileError::Other(Some(eco_format!("{err}"))))?
+            .into_tree();
+    }
+
+    Err(not_found())
+}
+
+/// Finds, among the git submodules declared in `repo`'s `.gitmodules`,
+/// the one mounted at `relative_path` (relative to `repo`'s own root),
+/// and opens it as its own repository -- or returns `None` if `repo` has
+/// no `.gitmodules`, none of its submodules sit at that path, or the
+/// matching one hasn't been initialized yet (no local repository to
+/// open).
+///
+/// Note this reads `.gitmodules` from `repo`'s current worktree/index/
+/// `HEAD` (there's no other reasonable choice: submodule checkouts, and
+/// thus their location on disk, aren't versioned per-revision the way
+/// file contents are) -- exactly what plain `git` itself does. If the
+/// revision being diffed added, removed, or moved a submodule since
+/// then, this can fail to find it even though the gitlink entry is
+/// right there in the tree.
+fn open_submodule(repo: &gix::Repository, relative_path: &Path) -> Option<gix::Repository> {
+    let submodules = repo.submodules().ok().flatten()?;
+    for submodule in submodules {
+        let Ok(path) = submodule.path() else { continue };
+        if gix::path::from_bstring(path) == relative_path {
+            return submodule.open().ok().flatten();
+        }
+    }
+    None
 }
 
 /// A `World` backed by either a real project directory or a specific git
