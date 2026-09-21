@@ -263,8 +263,33 @@ of this one) with a small `report.typ` committed a few times: tagged
 top of `v2.0`, to exercise all three kinds of revision. If it's empty
 after cloning this repository, fetch it once with:
 ```bash
-git submodule update --init examples/git-project
+git submodule update --init --recursive examples/git-project
 ```
+(`--recursive` because of `v3.0`/`submodule-template`, below — a plain
+`--init` is enough if all you need is `v1.0`/`v2.0`/`develop`.)
+
+`v3.0` (branch `submodule-template`, also on top of `v2.0`) additionally
+declares its own **nested** git submodule, `template/` (pointing at
+[`typst-diff-example-template`](https://github.com/SpMathieu/typst-diff-example-template)),
+and has `report.typ` `#import` a function from it:
+```bash
+cargo run --release -- git examples/git-project report.typ diff.pdf \
+  --old-rev v2.0 --new-rev v3.0
+```
+This exercises `git` mode reading a file that lives *inside* a
+submodule — a gitlink entry in the tree, naming a commit of another
+repository, rather than a tree or blob of this one (see
+`read_from_tree`/`open_submodule` in `world.rs`) — which it wasn't
+always able to do. One caveat this has, that plain `files` mode
+doesn't: `open_submodule` locates a submodule's own repository via
+`.gitmodules`, read from `examples/git-project`'s *current*
+worktree/index/`HEAD` — exactly what plain `git` itself does, since
+where a submodule actually lives on disk isn't versioned per-revision
+the way file contents are. So diffing a revision that (like `v3.0`)
+declares a submodule the currently-checked-out revision doesn't (like
+`v2.0`, or `v1.0`/`develop`) requires checking out one that does first
+— `git -C examples/git-project checkout v3.0` — even though nothing
+else about `git` mode needs a checkout at all.
 
 `--old-root`/`--new-root` work the same way as in `files` mode (see
 "Multi-file projects" above), except relative to the *repository's* own
@@ -368,7 +393,8 @@ typst-diff/
 │   ├── fonts/            # --font-path example dir (empty except a README)
 │   ├── packages/         # --package-path example dir (preview + local)
 │   ├── git-project/      # `typst-diff git` example (its own repo -- a
-│   │   └── ...            # submodule; see its own note below)
+│   │   ├── ...            # submodule; see "Diffing across git revisions")
+│   │   └── template/      # nested submodule, only at v3.0/submodule-template
 │   └── output/           # checked-in PDFs produced by the commands above
 │       ├── files-mode.pdf
 │       └── git-mode.pdf   # byte-identical to files-mode.pdf
