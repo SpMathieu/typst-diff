@@ -2,6 +2,10 @@
 //! computes a "track changes"-style diff, then rebuilds a `Content` with
 //! deletions struck through in red and additions underlined in blue.
 
+mod scoped;
+mod footnotes;
+mod tables;
+
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
@@ -694,103 +698,9 @@ impl Default for DiffOptions {
     }
 }
 
-/// Computes the diff between two `Content`s and returns a new, annotated
-/// `Content`.
-///
-/// By default, deletions are struck through in red and additions are
-/// underlined in blue. `options` lets the caller turn either annotation off:
-/// - hidden deletions are omitted from the output entirely,
-/// - hidden additions are kept, but rendered in standard style.
-///
-/// Styling rule: the *new* document's style always wins. Unchanged text
-/// (present in both versions) is rendered with the styles it has in the
-/// new document, even if only its styling (not its text) changed — so a
-/// pure style change is invisible in the diff (the "Known limitations"
-/// section of the README explains why: `collect()` only recognizes atoms
-/// as "the same" by their text/content, not by their styles), but at
-/// least the surviving text always looks like the new document intends.
-/// Deleted text (which has no counterpart in the new document) keeps
-/// whatever styling it had in the old document.
+/// Diff text while retaining the new document's evaluated content tree.
+/// Page marginalia and all structural style scopes follow the new version.
+/// Deleted text inherits its new insertion context, not old ancestor styles.
 pub fn diff_content(old: &Content, new: &Content, options: DiffOptions) -> Content {
-    let atoms_old = flatten(old);
-    let atoms_new = flatten(new);
-
-    let ops = capture_diff_slices(Algorithm::Myers, &atoms_old, &atoms_new);
-
-    let mut result = Vec::new();
-    let push_deleted = |result: &mut Vec<Content>, atom: &Atom| {
-        if options.show_deletions {
-            result.push(wrap_deleted(atom, options));
-        }
-    };
-    let push_added = |result: &mut Vec<Content>, atom: &Atom| {
-        result.push(if options.show_additions {
-            wrap_added(atom, options)
-        } else {
-            atom_to_content(atom)
-        });
-    };
-
-    for op in ops {
-        match op {
-            DiffOp::Equal { new_index, len, .. } => {
-                // Unchanged text still comes from the *new* document, so
-                // that a pure style change (e.g. this run turning bold)
-                // is reflected even though the diff doesn't flag it.
-                for i in 0..len {
-                    result.push(atom_to_content(&atoms_new[new_index + i]));
-                }
-            }
-            DiffOp::Delete {
-                old_index, old_len, ..
-            } => {
-                for i in 0..old_len {
-                    push_deleted(&mut result, &atoms_old[old_index + i]);
-                }
-            }
-            DiffOp::Insert {
-                new_index, new_len, ..
-            } => {
-                for i in 0..new_len {
-                    push_added(&mut result, &atoms_new[new_index + i]);
-                }
-            }
-            DiffOp::Replace {
-                old_index,
-                old_len,
-                new_index,
-                new_len,
-            } => {
-                // A straight 1-for-1 swap of two headings/strong()/emph()/
-                // links/tables is diffed into its parts instead of struck
-                // through/re-underlined whole (see `recurse_into_replaced`
-                // and `recurse_into_table`).
-                if old_len == 1 && new_len == 1 {
-                    let recursed = recurse_into_replaced(
-                        &atoms_old[old_index],
-                        &atoms_new[new_index],
-                        options,
-                    )
-                    .or_else(|| {
-                        recurse_into_table(&atoms_old[old_index], &atoms_new[new_index], options)
-                    });
-                    if let Some(content) = recursed {
-                        result.push(content);
-                        continue;
-                    }
-                }
-
-                // Otherwise, a modification = deletion of the old +
-                // addition of the new.
-                for i in 0..old_len {
-                    push_deleted(&mut result, &atoms_old[old_index + i]);
-                }
-                for i in 0..new_len {
-                    push_added(&mut result, &atoms_new[new_index + i]);
-                }
-            }
-        }
-    }
-
-    Content::sequence(result)
+    scoped::diff_content_scoped(old, new, options)
 }

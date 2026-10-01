@@ -320,18 +320,8 @@ pub(crate) fn diff_and_layout(
         addition_color: common.addition_color.to_vec4_u8(),
     };
     let annotated = diff::diff_content(&content_old, &content_new, diff_options);
-
-    // `#set page(header: ..., footer: ...)` (and any other page-construction
-    // property) is deliberately left out of `annotated` above -- see
-    // `collect()`'s `StyledElem` case in diff.rs for why carrying it along
-    // per atom, like an ordinary style, would fragment the document into
-    // one page per changed word. It's diffed and reapplied here instead,
-    // once, on top of the whole document.
-    let page_styles = diff::diff_page_marginalia(&content_old, &content_new, diff_options);
-    let annotated = annotated.styled_with_map(page_styles);
-
-    // Lays out this annotated content, reusing the "world" of the new
-    // version (for fonts, the standard library, etc.)
+    // The new tree retains page styles and their original scopes.
+    // Do not apply a second, globally merged page style map here.
     layout(world_new, &annotated)
 }
 

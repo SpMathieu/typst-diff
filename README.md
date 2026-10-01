@@ -3,8 +3,7 @@
 Compares two versions of a Typst document (`.typ`) and produces a PDF where:
 - **deleted** text appears struck through and in red,
 - **added** text appears underlined and in blue,
-- a modified sentence appears as "old version struck through" followed by
-  "new version underlined" (like Word's track changes).
+- changed words are annotated inside the retained content; unchanged words remain normal.
 
 The diff is computed on the `Content` resolved by Typst (after evaluating
 code, functions, variables), not on the raw source text — see `src/diff.rs`
@@ -321,55 +320,78 @@ the same two versions in.
 ### Graphical interface
 
 ```bash
-cargo run --release -- --gui
+cargo run --release --locked -- --gui
 ```
 
-**On Linux, install two system packages first** — neither is pulled in
-automatically by `cargo build`, since they're system packages, not Rust
-dependencies:
-- `libegl1` (`sudo apt install libegl1` on Debian/Ubuntu, including
-  Ubuntu-on-WSL) if you hit "Found no glutin configs matching the
-  template" when opening the window;
-- `libgtk-3-dev` (`sudo apt install libgtk-3-dev pkg-config`, needed to
-  *build*; the `libgtk-3-0` most desktops already have is enough to
-  *run*) for the **Browse…** buttons' file/folder pickers to work at
-  all.
+The resizable window has a **Files / Git revisions** form on the left and
+an in-memory document preview on the right. **Browse...** selects real
+filesystem paths. In Git mode, **Choose...** lists files/directories from
+Git trees and branches/tags from the selected repository; typed revisions
+can also be commit IDs. Git `FILE` and root fields refer to the repository,
+not the GUI's working directory.
 
-See "Known limitations" below for the full story on both, plus a third
-issue (and its fix) also found getting this working on WSLg.
+**Preview** renders the diff without writing a PDF. **Auto preview** refreshes
+it after a short pause in form edits. Scroll or drag to pan, use Ctrl+scroll
+or pinch to zoom, and **Fit width** to fit the page horizontally. These view
+controls do not change the document produced by the CLI. External edits to
+files, JSON data, fonts, packages or moving Git refs are not watched: click
+**Preview** again after changing them.
 
-This opens a window with a form instead of a command line: a **Files**/**Git
-revisions** switch at the top picks the mode (mirroring `typst-diff
-files`/`typst-diff git`), text fields with **Browse…** buttons fill in
-real filesystem paths for `files` mode. `git` mode's `FILE`/`--old-root`/
-`--new-root` are paths *inside the repository* at a specific revision,
-not real filesystem paths at all (nothing is ever checked out — see
-"Diffing across git revisions" above), so browsing the real filesystem
-for them would be actively misleading; instead, their own **Choose…**
-menu lists what's actually in the resolved git tree — every `.typ` file
-for `FILE` (from `--old-rev`'s tree if set, `--new-rev`'s otherwise,
-since `FILE` is one path shared by both), every directory (plus the
-repository root itself, as `.`) for `--old-root`/`--new-root` (each from
-its own revision). Typing a path by hand instead still works everywhere
-— every field is a plain text box underneath, "Choose…" only fills it
-in. `--old-rev`/`--new-rev` get the same treatment: their own
-**Choose…** lists the repository's branches and tags (typing an
-arbitrary commit still works too). The color pickers, checkboxes, and
-font-path list cover the rest of `CommonArgs`. **Generate** runs the
-same `run_files`/`run_git` the CLI itself calls, on a background thread
-so the window stays responsive, and offers an **Open** button for the
-resulting PDF once it's done.
+**Generate** saves the annotated PDF at **Output PDF**, using the same
+arguments and diff/layout functions as the preview. **Open** opens the
+exported PDF. Rendering/export run on worker threads so the form stays
+responsive.
 
-`gui.rs` is a thin layer over `main.rs`: nothing about how a diff is
-produced is reimplemented for it, only how the arguments are gathered —
-see its module doc comment. It adds three dependencies gated behind no
-feature flag of their own (so they're always pulled in, even for
-`files`/`git`-only use): [`eframe`](https://docs.rs/eframe) (window +
-widgets), [`rfd`](https://docs.rs/rfd) (native file/folder dialogs), and
-[`open`](https://docs.rs/open) (launching the PDF viewer). This is the
-one part of the project with a real, unavoidable runtime dependency on a
-display server (X11/Wayland/macOS/Windows) — everything else works
-identically over SSH/in a container.
+#### Copying the equivalent CLI command
+
+**Copy command**, immediately next to **Generate**, copies a complete command
+to the system clipboard. It includes the running executable, `files` or
+`git`, the input/output paths, both Git revisions when applicable, explicit
+roots, all font paths, the package path, both hide switches when enabled,
+and both colors (including transparency). An empty Output PDF uses `diff.pdf`.
+Copying does not generate a file or execute the command.
+
+The button is enabled after a successful preview whose settings still match
+the form. It is disabled while rendering, after an error, or when document
+settings change before the preview is refreshed. This avoids copying a
+command for different content from the preview currently displayed. Changing
+only **Output PDF** does not require another preview; the command uses the
+new destination. Clipboard feedback is independent of the PDF export status.
+
+Real filesystem paths and the executable are made absolute, so the command
+can be pasted from another working directory on the same machine. Git tree
+paths (`FILE`, `--old-root`, `--new-root`) stay repository-relative. Optional
+empty fields remain omitted, preserving the CLI defaults. Arguments are
+quoted, including spaces, apostrophes and hex colors; options use
+`--name=value`, and `--` separates them from positional paths.
+
+On Linux/macOS the command targets **sh, bash or zsh**. Under WSL, paste it
+into the same WSL environment, not a Windows terminal session. A native
+Windows build copies a **PowerShell 7.3+** command, not a `cmd.exe` command;
+a local script block selects standard native argument passing without
+changing the caller's preference. Paths with invalid Unicode, NUL or line
+breaks are rejected rather than silently altered.
+
+Reproduction assumes the same files/JSON, Git refs, packages, fonts, binary
+and relevant environment. The clipboard command is not an archived snapshot,
+and branch names are not pinned to commits. Preview rasterization and PDF
+viewer antialiasing can differ; PDF bytes/metadata are not promised identical.
+
+#### Linux desktop requirements
+
+On Debian/Ubuntu, including Ubuntu-on-WSL, install `libegl1` when the window
+reports "Found no glutin configs matching the template", and
+`libgtk-3-dev pkg-config` to build the native file pickers:
+
+```bash
+sudo apt install libegl1 libgtk-3-dev pkg-config
+```
+
+See "Known limitations" for the existing WSLg/display troubleshooting notes.
+The GUI uses `eframe` (window/widgets and clipboard), `rfd` (file dialogs),
+`open` (PDF viewer), and `typst-render` (preview rasterization). These are
+already dependencies; clipboard export adds none. Only the GUI needs a
+working desktop/display. CLI operation and non-rendering unit tests do not.
 
 ## 4. Project structure
 
@@ -399,10 +421,18 @@ typst-diff/
 │       ├── files-mode.pdf
 │       └── git-mode.pdf   # byte-identical to files-mode.pdf
 └── src/
-    ├── main.rs          # entry point: CLI (files/git subcommands), orchestration
-    ├── gui.rs           # --gui: a form-based front end over main.rs
-    ├── world.rs         # minimal implementation of `typst::World`
-    └── diff.rs           # Content flattening + diff + reconstruction
+    ├── main.rs                        # CLI arguments, orchestration, shared rendering
+    ├── gui.rs                         # form, preview, PDF export and copy-button wiring
+    ├── gui/
+    │   ├── command.rs                 # CLI serialization, quoting and clipboard feedback
+    │   └── command/
+    │       └── tests.rs               # CLI round-trip and preview-state tests
+    ├── world.rs                       # filesystem / Git implementation of typst::World
+    ├── diff.rs                        # matching and recursive-diff entry points
+    └── diff/
+        ├── scoped.rs
+        ├── tables.rs
+        └── footnotes.rs
 ```
 
 ## 5. Known limitations (possible improvements)
@@ -428,109 +458,30 @@ typst-diff/
   musl) minimal. For a fully-featured `World` (downloads included), look
   at `typst-cli`'s `SystemWorld` instead (see the Typst GitHub repo,
   `crates/typst-cli/src/world.rs`).
-- **Style follows the new document, but pure style changes aren't
-  flagged**: `collect()` (in `src/diff.rs`) carries each atom's styles
-  (color, weight, italics...) along as it flattens a `StyledElem`, and
-  `diff_content()` always reapplies the *new* document's styles to
-  unchanged text — so `text(fill: ..., weight: ..., style: ...)[...]`
-  content renders correctly even when the diff has nothing to say about
-  it (see `examples/*/src/confidential.typ`'s `Confidential` line).
-  What this doesn't do is *flag* a pure style change as a change: since
-  `atom_key()` deliberately ignores styles when matching atoms between
-  versions (so text isn't wrongly treated as deleted+re-added just
-  because its color changed), a paragraph that only turned bold looks
-  identical to the diff — it's shown correctly styled, just without a
-  strikethrough/underline marker anywhere. Separately, a style change
-  made via an element `collect()` doesn't traverse (e.g. wrapping text in
-  `strong()` in one version but not the other, as `status` in the
-  examples does) is a different case entirely: `strong(...)` and plain
-  text become different *kinds* of atoms (a `Leaf` vs `Word`s), so they
-  never match, and the diff shows a full delete of the old, plain version
-  followed by a full insert of the new, bold one.
-- **Word-by-word diff inside headings, `strong()`, `emph()`, and links,
-  but not arbitrary elements**: by default, `collect()` treats an element
-  it doesn't specifically know how to traverse (an image, a table, a
-  citation...) as one opaque block — editing anything inside it strikes
-  through/re-underlines the *whole* thing. Headings (`= Title`),
-  `strong()`, `emph()`, and links are the exceptions: `diff_content()`'s
-  `recurse_into_replaced()` specifically recognizes when the top-level
-  diff wholesale-replaced one of these with another of the *same* kind,
-  and in that case diffs their bodies word by word instead, rewrapping the
-  result in a fresh element that keeps the new document's own other
-  attributes (heading level/numbering, link destination...). See
-  `examples/*/src/main.typ` for a live demonstration of all four (the
-  heading title, plus a paragraph with a partly-edited bold phrase,
-  italic phrase, and link). These can't just be traversed and flattened
-  away during `collect()` the way `SequenceElem`/`StyledElem` are, since
-  unlike those, their wrapper is what makes them render as a
-  heading/bold/italic/a link at all — it has to be rebuilt around the
-  diffed body, not discarded. Add a case to `impl_body_element!`'s list in
-  `src/diff.rs` for other single-body wrapper elements you want the same
-  treatment for.
-
-  This recursion only kicks in when the two bodies share at least one
-  word — otherwise (e.g. one client's name entirely replaced by an
-  unrelated one, both set in `strong()`) it's skipped in favor of the
-  plain whole-span delete-then-insert, since word-level diffing of two
-  completely unrelated phrases can scramble them across each other in a
-  confusing order (spaces "match" regardless of the words around them, so
-  even totally different text can appear to partially align). The
-  "Dupont Inc." → "Martin & Co." client name in the examples exercises
-  this fallback deliberately, right next to the cases that do recurse.
-- **Tables are diffed row by row, matched by *position* — not by
-  content**: unlike the `BodyElement` wrapper elements (one `body` each),
-  a table is *many* bodies (one per cell) that need to be grouped into
-  rows first, so it gets its own function, `recurse_into_table()`: row 1
-  of the old table is compared against row 1 of the new one, row 2
-  against row 2, and so on — deliberately a plain positional comparison,
-  not a search for which old row "best matches" which new row by content
-  (an earlier version tried that with a content-based Myers diff over
-  rows; it broke down as soon as *every* row's value changed at once,
-  with no unchanged row left to anchor the alignment, falling back to
-  stacking the whole old table on top of the whole new one instead of
-  showing in-place edits). Each pair of rows at the same position is then
-  diffed cell by cell (each cell recursed into via `diff_content`, so an
-  edited value stays a word-level diff inside that one cell), *unless*
-  the two rows share no whole cell at all, in which case the old row is
-  struck through and the new one inserted right after it rather than
-  scrambling two unrelated rows together — see `row_shares_content()`
-  (whole-cell matching, not word-level: two unrelated percentages sharing
-  the literal "%" doesn't count as the row having something in common).
-  Extra rows past the shorter table's length are likewise whole-row
-  deletions/insertions. `examples/*/items.json` exercises all of this at
-  once: values edited in place, a row with nothing in common with its
-  counterpart, a truly identical row, and a trailing insertion.
-
-  This only handles the common case, though: `recurse_into_table()` gives
-  up (falling back to the plain whole-table swap) if the two tables were
-  given a different `columns` layout, or either uses
-  `table.hline`/`table.vline` (manually placed lines have no well-defined
-  place to end up once rows shift around them) — see `table_cells()`'s
-  doc comment. It also always keeps the *new* table's
-  `table.header`/`table.footer` as-is rather than diffing them. And since
-  rows are matched purely by position, a row inserted or removed anywhere
-  but the end shifts the pairing for every row after it (there's no
-  attempt to detect that rows moved) — the "shares a word"/"shares a
-  cell" guards only stop unrelated *paired* rows from being scrambled
-  together, they don't recover the "really" corresponding rows once
-  positions have shifted.
-
-  Positional matching is specific to rows *within* one table, though —
-  `examples/*/src/items_by_table.typ` renders the exact same data as
-  `items.typ`, but as a separate one-row table per department instead of
-  one shared table, and gets the *content*-based matching every other
-  top-level element gets (the same mechanism a heading or a paragraph is
-  matched by): each small table is aligned against the others by what's
-  in it, not by where it sits. On this particular data the two approaches
-  happen to reach the same visual result (compare the two tables the
-  example produces), but they get there differently, and could easily
-  diverge on data where positions and content-identity disagree — e.g. a
-  reordered list would confuse the positional version but not the
-  content-matched one, while the content-matched version could
-  misidentify an edit as an unrelated delete-then-insert if `atom_key`
-  can't find enough left in common (see `try_recurse`'s "shares a word"
-  guard) where the positional version, having nothing better to compare
-  a row against, would still pair rows up and diff them in place.
+- **Styles and document structure follow the new version; style-only edits
+  are not highlighted**: `src/diff/scoped.rs` keeps the new document's
+  `StyledElem`/`SequenceElem` scopes and inserts annotations into that tree.
+  Page, paragraph and alignment styles are not reapplied to each word.
+  Deleted text inherits the style at its insertion point. Matching ignores
+  many style properties, so a color/font-only edit may be rendered without
+  a change marker. Changing an element's kind can still be a replacement.
+- **Recursive diffing is explicit, not universal**: recognized headings,
+  `strong`, `emph`, links and supported containers retain their new-version
+  properties while their bodies are compared. The table and footnote modules,
+  when present below, have dedicated handling. Unknown elements remain
+  opaque, and structurally incompatible replacements may still be shown as
+  a whole deletion followed by an insertion. The matcher does not generally
+  track arbitrary moved content across the document.
+- **JSON-generated tables are compared cell by cell when their organization
+  stays compatible**: the diff operates on evaluated Typst content, not JSON
+  source lines. `src/diff/tables.rs` preserves the new table/cell properties
+  and diffs the cell bodies, including supported header/footer cells,
+  horizontal/vertical rules, inherited columns and unchanged cell spans.
+  Supported `figure`, `block`, `align`, `box` and `pad` wrappers are retained.
+  Rows are not associated by a JSON record ID. Insertions, removals, reordering
+  or changed spans/layout can require the older positional fallback or a
+  whole-table replacement. A changed number should stay within its cell;
+  the patch is not a general table-structure or row-movement tracker.
 - **A structural change (e.g. text → table) is an unrelated
   delete-then-insert, not a "reformat"**: the diff has no concept of "this
   paragraph became a table with the same information" — a run of text and
@@ -542,53 +493,31 @@ typst-diff/
   knowing about — see the "Regional highlights" paragraph/table pair at
   the end of `examples/*/src/main.typ` for what this looks like in
   practice.
-- **Page header/footer are diffed once for the whole document, not per
-  word — and only when they're set once, near the top**: `#set
-  page(header: ..., footer: ...)` (and any other page-construction
-  property: `margin`, `numbering`, `paper`...) doesn't produce ordinary
-  Content the way a paragraph does — it's a *style* property (`PageElem`
-  in typst-library), invisible to `collect()`'s usual
-  flatten-into-comparable-atoms traversal in `src/diff.rs`. Early on, this
-  project just let it ride along like any other style (`text(fill:
-  ...)`, `emph()`...), carried on every individual atom for
-  `atom_to_content`/`wrap_deleted`/`wrap_added` to reapply when
-  reconstructing the annotated output. That silently dropped header/
-  footer changes from the diff entirely (whichever the *last*-styled atom
-  happened to carry is what showed, on every page) — and, worse, since a
-  page property really did differ between the struck-through old atoms
-  and the underlined new ones, Typst inserted an automatic page break at
-  every single boundary where the two disagreed, fragmenting the whole
-  document into roughly one page per changed word. `collect()` now
-  strips `PageElem` properties out of what it carries per atom; `main.rs`
-  diffs the header/footer content separately (`root_styles`/
-  `diff_page_marginalia` in `src/diff.rs`) and reapplies the result once,
-  on top of the whole document, alongside the *new* document's other page
-  properties. `root_styles` finds this by walking the same nested
-  `SequenceElem`/`StyledElem` structure `collect()` does, in document
-  order — which reliably finds one `#set page(...)` wherever it sits
-  among a document's top-level content (this doesn't have to be the very
-  first statement — see `examples/*/src/main.typ`, where it comes after
-  some `#import`/`#let` lines), but doesn't attempt to make sense of
-  *several* independent `#set page(header: ...)` calls further down the
-  same document, each meant to apply to only part of it — an edge case
-  outside what this project's examples exercise.
-- **A `context [...]` expression's *body* can't be told apart from
-  another one's**: `atom_key()` falls back to a `Leaf` atom's `Debug`
-  representation to compare it across versions (see its doc comment), but
-  a `context [...]` block (what `#counter(page).display()` and similar
-  expressions expand to) is a `ContextElem` wrapping a `Func` closure, and
-  `Func`'s own `Debug` impl only ever prints `Func(..)` for an anonymous
-  closure — never what's inside it. Two *different* `context [...]`
-  bodies (say, one showing `Page X` and another showing something else
-  entirely) are therefore indistinguishable to the diff, and register as
-  "the same atom, unchanged" (see `examples/*/src/main.typ`'s footer: its
-  `context [... #counter(page).display() ...]` is intentionally identical
-  code in both versions, which is the only case this can be relied on to
-  render sensibly). What still works well is the common case demonstrated
-  there: a `#counter()`/`context` expression is normally surrounded by
-  ordinary text (`"Page "`, `" of "`...), and *that* text diffs correctly
-  word by word — it's only a change to what the counter/context
-  expression itself computes that goes unnoticed.
+- **Page headers/footers are preserved from the new version, not annotated
+  as a separate diff**: scoped reconstruction keeps local page settings in
+  place, including a later section that disables its header or footer.
+  The old global `root_styles` / `diff_page_marginalia` merge is no longer
+  applied by the patched main rendering path. Retained deletions can still
+  change pagination naturally. Content hidden in deferred contexts remains
+  subject to the context limitation below.
+- **Footnote edits keep one note**: `src/diff/footnotes.rs` diffs a matched
+  note's body while retaining the new note's structure. A modified or added
+  note has an addition-colored number; only an entirely deleted note has a
+  deletion-colored number. Partial deletion within a note is a modification.
+  Numbers are colored, not struck through or underlined; removed body text
+  is struck through and added text is underlined, including at the bottom
+  of the page. Unchanged text remains normal. `--hide-deletions` removes
+  deletions; `--hide-additions` removes addition highlighting without removing
+  new text. Deleted notes kept for review still count in diff numbering.
+  Custom `footnote.entry` rules that ignore the note's body/numbering, global
+  reference coloring, ambiguous note moves and deferred contexts have limits.
+- **Deferred `context` content is not generally diffed internally**: some
+  evaluated elements wrap functions whose debug representation does not
+  identify their captured content. Preserving the new tree preserves its
+  contexts, but does not make edits hidden inside them detectable. This
+  affects templates or generated tables/notes that are only constructed
+  during later contextual realization. An unchanged-looking diff is not
+  evidence of no change inside such a context.
 - **Layout now stabilizes across multiple passes — evaluation still
   doesn't**: Typst normally re-runs layout several times so
   introspection-dependent content (a table of contents,

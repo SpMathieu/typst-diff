@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "installed": {
+    "src/gui.rs": "824d40310121b9d726969f192e4421770da71339128b466a0092ac6cc2a9e4b1",
+    "README.md": "4ef8a58725f8a2c0c76b309f333f6e1f6c30095a1813c9106128aecf43bc6c4a",
+    "src/gui/command.rs": "922c543a3148cb0d082f3d700c802e7f1f6038e6ab35b51326b53a7d9777fcfe",
+    "src/gui/command/tests.rs": "17079da3724cbef8bec24056b70aa592eaef34f12f6296015708d717512e680a"
+  },
+  "original": {
+    "src/gui.rs": "6c7f595cb1866e539d0e76d790dea24ae5115570a5ef4413b1c63c4ba403c0dc",
+    "README.md": "76fba3832b2c5f97e0bfb262e971ac581bf66bcfa76e51970045153ea6bbe0c8"
+  },
+  "created_dirs": [
+    "src/gui",
+    "src/gui/command"
+  ]
+}

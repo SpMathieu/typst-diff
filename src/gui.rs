@@ -8,6 +8,8 @@
 //! CLI itself calls -- on a background thread (so the window stays
 //! responsive while Typst compiles/lays out/exports to PDF).
 
+mod command;
+
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -104,6 +106,7 @@ struct App {
     font_paths: Vec<String>,
     package_path: String,
 
+    command_state: command::CommandState,
     status: Status,
     /// `Some` while a `run_files`/`run_git` call is in flight on another
     /// thread -- polled (non-blockingly) from `update()`.
@@ -216,6 +219,7 @@ impl Default for App {
             addition_color: egui::Color32::from_rgb(0x00, 0x00, 0xff),
             font_paths: Vec::new(),
             package_path: String::new(),
+            command_state: command::CommandState::default(),
             status: Status::Idle,
             job: None,
             preview: Preview::Idle,
@@ -366,10 +370,14 @@ impl App {
             }
             ui.checkbox(&mut self.auto_preview, "Auto preview")
                 .on_hover_text("Re-render the preview automatically, shortly after any field changes.");
+        });
+        ui.horizontal(|ui| {
             if ui.add_enabled(!running, egui::Button::new("Generate")).clicked() {
                 self.start_job();
             }
+            self.copy_command_button(ui);
         });
+        self.copy_command_feedback(ui);
         ui.horizontal(|ui| {
             match &self.status {
                 Status::Idle => {}
@@ -552,6 +560,7 @@ impl App {
     /// `App::preview_job`'s doc comment for why), turned into
     /// `TextureHandle`s once they arrive, in [`Self::poll_preview`].
     fn start_preview(&mut self) {
+        self.remember_preview_inputs();
         let (tx, rx) = mpsc::channel();
         self.preview_job = Some(rx);
         self.preview = Preview::Running;
